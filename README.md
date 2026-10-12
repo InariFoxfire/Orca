@@ -81,18 +81,33 @@ Orca is released under the [MIT License](LICENSE). Its source, tool contracts, s
 - Context-window and session-cost visibility when provider metadata is available.
 - Request-scoped project instructions and explicitly loaded project skills.
 
-## What's New In 1.2.1
+## What's New In 1.3.0
 
-Orca 1.2.1 is a reliability-focused release for long, stateful Godot workflows:
+Orca 1.3.0 adds visual references to the development workflow and refreshes settings:
 
-- Strict provider completion validation, bounded total-generation deadlines, and provider/turn lifecycle ownership.
-- Explicit Plan-to-Work requests without weakening normal mutation approval.
-- Atomic conservative tool batches, semantic loop detection, and safe context-pressure finalization.
-- Deterministic mutation recovery outcomes with retained proposal and post-write verification.
-- Exact same-turn game-process cleanup, bounded final evidence, and a tested run/fix/rerun/verify workflow.
-- Privacy-safe support diagnostics, resilient active composer behavior, and corrected Expanded Diff window ownership.
+- Attach PNG, JPEG, and WebP still images to requests using vision-capable models.
+- Paste screenshots, drag existing project images, or use a separate native desktop drop/Browse window.
+- Floating thumbnails, larger previews, and restored image context in project conversation history.
+- Model-aware attachment controls, explicit unknown-profile configuration, and bounded image preparation/context/storage.
+- Neutral icon navigation for Provider, System, and About settings, with an English-only language field.
+- About links to documentation, the website, source, issues, and feature discussions.
 
 Read the complete release notes in the [changelog](CHANGELOG.md) or download the latest build from [GitHub Releases](https://github.com/cold-atom/Orca/releases/latest).
+
+## Image Attachments
+
+Give Orca a screenshot of your UI, a reference image, or an error screenshot alongside your prompt:
+
+1. Select a model and endpoint that support image input. Vision capability is separate from Agent-tool compatibility; unavailable controls are dimmed.
+2. Click the composer image icon and **Browse** or drop desktop images into the separate **Attach images** window.
+3. Alternatively, paste copied image pixels with **Ctrl/Cmd+V**, or drag an existing image from Godot's FileSystem dock onto the input.
+4. Review the floating thumbnails, remove any unwanted images, and press Send. Click a thumbnail for a larger preview.
+
+**Desktop drops belong in the attachment window.** Dropping desktop files onto Godot's main editor/dock invokes Godot's import handler and may create copies in the selected project folder. The separate window isolates attachment intake; direct seamless desktop dropping onto the dock remains future work.
+
+Orca accepts up to four PNG/JPEG/WebP still images per message. Source files are limited to 10 MiB and 16 megapixels, then normalized to PNG at up to 2048 pixels per side and 1 MiB each. Prepared images remain available through tool follow-ups and restore with conversation history. PDFs, documents, animated images, and automatic screenshot capture are not included.
+
+Custom/local profiles with unknown image capability can explicitly enable unconfirmed input under Provider settings for the exact endpoint/model. This is a compatibility assertion, not a vision-quality test.
 
 ## Demo
 
@@ -172,11 +187,11 @@ For development setup and test commands, see [DEVELOPMENT.md](DEVELOPMENT.md) an
 
 ## Data And Privacy
 
-Before submitting a request, make sure you trust the selected provider and endpoint. Prompts, relevant editor context, and project content returned by Orca's tools may be sent to that provider. A locally hosted endpoint can still forward data elsewhere; Orca cannot verify what a server does after receiving a request.
+Before submitting a request, make sure you trust the selected provider and endpoint. Prompts, attached images, relevant editor context, and project content returned by Orca's tools may be sent to that provider. A locally hosted endpoint can still forward data elsewhere; Orca cannot verify what a server does after receiving a request.
 
 Editable LAN and remote endpoints require confirmation for their exact scheme, host, and effective port. Orca identifies unencrypted non-loopback HTTP connections and does not follow provider chat or model-discovery redirects. Confirmation is informed consent, not proof that a server is trustworthy.
 
-API credentials are saved through Godot Editor Settings. Project conversation history is stored locally as plaintext JSON under Godot's `user://` storage. Neither mechanism is an encrypted operating-system credential vault.
+API credentials are saved through Godot Editor Settings. Project conversation history, including submitted images, is stored locally as plaintext JSON under Godot's `user://` storage. Pending attachment drafts are memory-only; submitted images are removed with conversation deletion/retention. Sessions retain at most 32 unique images / 8 MiB of image data within a 16 MiB total JSON limit. Neither storage mechanism is an encrypted operating-system credential vault.
 
 The About page can copy a privacy-safe diagnostic report for support. It uses a strict allowlist containing Orca/Godot versions and coarse provider/request state; it excludes credentials, endpoint addresses, model IDs, project paths and content, conversations, model output, logs, process output, file changes, and hashes.
 
@@ -186,7 +201,8 @@ See [SECURITY.md](SECURITY.md) for the complete security and operational model.
 
 ## Current Limits
 
-- Orca 1.2.1 supports Godot **4.7.2**. Broader Godot compatibility is not currently claimed.
+- Orca 1.3.0 supports Godot **4.7.2**. Broader Godot compatibility is not currently claimed.
+- Native attachment drops were verified on Linux/X11/Vulkan; other platforms/renderers and detached editor windows need acceptance testing.
 - Runtime verification uses bounded process output and predeclared startup or exit criteria. It cannot prove visual or gameplay correctness.
 - Pending approvals and revert checkpoints do not survive an editor or plugin restart.
 - Structured scene operations deliberately support a constrained set of nodes, values, dependencies, and signals.
@@ -198,7 +214,7 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for the full architecture, tool contracts, 
 
 ## Project Status
 
-The current release is **Orca 1.2.1** for **Godot 4.7.2**. Orca is a functional development-stage agent with permanent automated tests and CI, but it is still evolving. Review proposals carefully and use version control on real projects.
+The prepared release is **Orca 1.3.0** for **Godot 4.7.2**. Orca is a functional development-stage agent with permanent automated tests and CI, but it is still evolving. Review proposals carefully and use version control on real projects.
 
 ## Contributing
 

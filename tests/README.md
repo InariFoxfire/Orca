@@ -26,6 +26,29 @@ Run protocol-aware context estimation, reserve, compaction-boundary, oversized-a
 "$GODOT_BIN" --headless --path . --script res://tests/context_budget_test.gd
 ```
 
+Image preparation, capability, storage/restoration, controller continuation, and narrow tray lifecycle checks:
+
+```bash
+"$GODOT_BIN" --headless --path . --script res://tests/image_attachments_test.gd
+"$GODOT_BIN" --headless --path . --script res://tests/image_intake_test.gd
+```
+
+With `ORCA_TEST_REQUESTS=2 python3 tests/http_test_server.py` running, verify actual multimodal SSE transport and retained images across a tool continuation:
+
+```bash
+"$GODOT_BIN" --headless --path . --script res://tests/image_attachments_integration_test.gd
+```
+
+Manual image gates: select PNG/JPEG/WebP using Browse in Orca's attachment window, inspect thumbnail/remove/preview behavior at narrow widths and different editor scales, send to a live vision-capable profile, exercise tool follow-ups, switch to a text-only profile, fail/cancel with a newer draft, restart and inspect saved previews, and delete the conversation. Paste real screenshot pixels with Ctrl/Cmd+V and context-menu Paste; verify normal text replacement/undo and text-only-model behavior. Drag project files from Godot's FileSystem dock onto the input and desktop files into the separate attachment window, confirming no project copies are created. Check close, session/profile change, full tray, malformed files, hidden Settings/History, and detached-editor behavior. Desktop files dropped on the main editor still trigger Godot import; the separate native window is required to isolate desktop intake. Headless tests use a fake clipboard; localhost tests do not establish live-provider vision quality.
+
+Native Linux/X11 drop regression (requires a real or virtual X11 display and `python-xlib`; not a headless suite):
+
+```bash
+python3 tests/native_image_drop_test.py
+```
+
+Set `GODOT_BIN` first. This launches a fixture-only Godot editor, sends real XDND file transfers to the owned native window, verifies accepted/unsupported drops and close invalidation, and hashes all non-generated project files to prove there are no project-file changes. It uses a temporary synthetic PNG outside the project, does not send provider requests, and cleans its temporary directory. CI does not currently install the X11 prerequisites. Verified on Godot 4.7.2 Linux/X11/Vulkan; other platforms/renderers remain manual gates. The native editor harness emits visible progress-dialog/RID/ObjectDB diagnostics; it waits for filesystem and teardown completion before exiting.
+
 Run line-patch materialization and newline-preservation checks:
 
 ```bash
@@ -62,7 +85,7 @@ Run the narrow History layout check:
 "$GODOT_BIN" --headless --path . --script res://tests/history_view_test.gd
 ```
 
-Run provider/About tab switching, release metadata, and narrow settings-layout checks:
+Run icon-based Provider/System/About switching, English-only language presentation, release metadata, and narrow settings-layout checks:
 
 ```bash
 "$GODOT_BIN" --headless --path . --script res://tests/settings_view_test.gd

@@ -22,6 +22,8 @@ func _ready() -> void:
 
 
 func _draw() -> void:
+	if disabled:
+		return
 	if is_pressed():
 		draw_style_box(_pressed_style, Rect2(Vector2.ZERO, size))
 	elif is_hovered():

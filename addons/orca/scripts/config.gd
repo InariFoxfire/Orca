@@ -77,7 +77,8 @@ static func get_active_provider_config() -> Dictionary:
 		"model": get_model(),
 		"reasoning_effort": get_reasoning_effort(),
 		"confirmed_origin": get_confirmed_origin(get_provider()),
-		"agent_compatibility": get_agent_compatibility(get_provider())
+		"agent_compatibility": get_agent_compatibility(get_provider()),
+		"image_input_override": _get_provider_value(get_provider(), "image_input_override", {})
 	}
 
 
@@ -90,7 +91,8 @@ static func get_provider_config(provider_id: String) -> Dictionary:
 		"model": str(_get_provider_value(provider_id, "model", definition.get("default_model", ""))),
 		"reasoning_effort": str(_get_provider_value(provider_id, "reasoning_effort", "default")),
 		"confirmed_origin": get_confirmed_origin(provider_id),
-		"agent_compatibility": get_agent_compatibility(provider_id)
+		"agent_compatibility": get_agent_compatibility(provider_id),
+		"image_input_override": _get_provider_value(provider_id, "image_input_override", {})
 	}
 
 
@@ -125,6 +127,12 @@ static func save_provider_profile(provider_id: String, api_key: String, model: S
 
 static func get_confirmed_origin(provider_id: String) -> String:
 	return str(_get_provider_value(provider_id, "confirmed_origin", ""))
+
+
+static func set_image_input_override(provider_id: String, binding: String, enabled: bool) -> void:
+	var settings := _get_editor_settings()
+	if settings:
+		settings.set_setting(_provider_setting(provider_id, "image_input_override"), {"binding": binding, "enabled": enabled})
 
 
 static func set_confirmed_origin(provider_id: String, origin: String) -> void:

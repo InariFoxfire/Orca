@@ -75,7 +75,12 @@ The project is currently a functional, foundational Godot Editor Plugin located 
    - Stores separate API key, endpoint, model, and reasoning-effort selections per provider and discovers bounded model lists from provider APIs. Editable profiles start in Chat mode; one isolated synthetic function-call probe and a separate user opt-in can enable tools only for the exact matching compatibility binding.
    - Uses Ollama `/api/tags` and LM Studio `/api/v1/models` metadata to hide known embedding models, with a conservative name fallback and unrestricted manual Model ID override.
    - Integrates with Godot's Editor Settings for persistence. Editor Settings is not an encrypted OS credential store.
-   - The About page copies a memory-only strict-allowlist support report with Orca/Godot versions and coarse provider/request state while excluding endpoint addresses, credentials, model IDs, project and conversation data, model output, logs, file changes, and hashes.
+    - The About page copies a memory-only strict-allowlist support report with Orca/Godot versions and coarse provider/request state while excluding endpoint addresses, credentials, model IDs, project and conversation data, model output, logs, file changes, and hashes.
+    - Provider, System, and About use neutral icon navigation. System currently shows English only; About links to Orca docs, website, source, issues, and feature discussions.
+8. **Image References (1.3.0)**
+    - Attach up to four bounded PNG/JPEG/WebP still images with floating previews, removal, and larger preview actions. Vision capability is model/endpoint-specific and independent of Agent-tool support.
+    - Paste screenshot pixels into the composer or drag existing project images from Godot's FileSystem dock. Desktop files use the image button's separate native drop/Browse window; dropping them onto the main editor still invokes Godot import.
+    - Images are normalized and included in multimodal requests throughout tool follow-ups, with conservative image context reserves and deduplicated project-scoped local history. Submitted images restore after restart and are deleted with the conversation; pending drafts are memory-only.
 
 ## What We Are Building (The Vision)
 We are building a truly autonomous copilot for game development in Godot, similar to GitHub Copilot or Roo Code (formerly Cline), but deeply integrated into the Godot ecosystem. The goal is to move beyond simple chat interfaces to an AI agent that understands the full context of a Godot project.
@@ -87,6 +92,7 @@ We are building a truly autonomous copilot for game development in Godot, simila
 - **Debugging Assistant:** Bounded automatic post-launch observation, conservative runtime diagnostics, reviewed fixes, explicit reruns, and scoped startup/exit verification without claiming visual gameplay correctness.
 - **Local-First Focus:** Ensuring the plugin works flawlessly with locally-hosted, fast open-source models (like Llama 3 or Qwen) for privacy-conscious developers.
 - **Robustness:** Refining error handling for complex edge cases (e.g., massive files, connection timeouts) and creating better syntax parsing.
+- **Seamless Desktop Attachment Drops:** Investigate public cancellable Godot drop routing or propose an engine enhancement; retain the separate native window until direct composer drops can be proven not to import project files.
 
 Progressive tool-schema disclosure remains a future optimization and is not currently implemented.
 

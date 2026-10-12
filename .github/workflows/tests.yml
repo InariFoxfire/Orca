@@ -38,6 +38,8 @@ jobs:
           "$GODOT_BIN" --headless --path . --script res://tests/provider_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/endpoint_policy_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/context_budget_test.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/image_attachments_test.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/image_intake_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/patch_utils_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/tools_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/agent_controller_test.gd
@@ -95,6 +97,12 @@ jobs:
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
           "$GODOT_BIN" --headless --path . --script res://tests/agent_compatibility_probe_integration_test.gd
+          wait "$server_pid"
+          trap - EXIT
+          ORCA_TEST_REQUESTS=2 python3 tests/http_test_server.py &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          "$GODOT_BIN" --headless --path . --script res://tests/image_attachments_integration_test.gd
           wait "$server_pid"
           trap - EXIT
 

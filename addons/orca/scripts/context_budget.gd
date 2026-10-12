@@ -5,6 +5,7 @@ const COMPACTION_NOTICE := "ORCA CONTEXT NOTICE: Earlier completed conversation 
 const TOKEN_BYTES := 3
 const MESSAGE_OVERHEAD_TOKENS := 8
 const TOOL_OVERHEAD_TOKENS := 24
+const ImageAttachments = preload("res://addons/orca/scripts/image_attachments.gd")
 
 
 static func prepare(messages: Array, tools: Array, context_window: int) -> Dictionary:
@@ -47,9 +48,17 @@ static func prepare(messages: Array, tools: Array, context_window: int) -> Dicti
 
 
 static func estimate_tokens(messages: Array, tools: Array) -> int:
-	var serialized := JSON.stringify({"messages": messages, "tools": tools})
+	var text_messages := messages.duplicate(true)
+	var image_tokens := 0
+	for message in text_messages:
+		if typeof(message) != TYPE_DICTIONARY:
+			continue
+		for image in message.get("images", []):
+			image_tokens += ImageAttachments.image_token_reserve(image)
+		message.erase("images")
+	var serialized := JSON.stringify({"messages": text_messages, "tools": tools})
 	var byte_count := serialized.to_utf8_buffer().size()
-	return ceili(float(byte_count) / TOKEN_BYTES) + messages.size() * MESSAGE_OVERHEAD_TOKENS + tools.size() * TOOL_OVERHEAD_TOKENS
+	return image_tokens + ceili(float(byte_count) / TOKEN_BYTES) + messages.size() * MESSAGE_OVERHEAD_TOKENS + tools.size() * TOOL_OVERHEAD_TOKENS
 
 
 static func _protected_turn_start(messages: Array, minimum_index: int) -> int:

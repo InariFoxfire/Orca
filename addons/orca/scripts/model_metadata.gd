@@ -26,6 +26,7 @@ static func resolve(model: String, api_url: String = "", fallback_model: String 
 	for key in candidates:
 		if MODELS.has(key):
 			metadata = MODELS[key].duplicate(true)
+			metadata["image_input"] = key.begins_with("openai/")
 			metadata["source"] = "Orca fallback catalog"
 			break
 	for key in candidates:
@@ -64,6 +65,9 @@ static func metadata_from_catalog(catalog, provider: String, model: String) -> D
 	if typeof(model_data) != TYPE_DICTIONARY or model_data.is_empty():
 		return {}
 	var metadata := {"source": "models.dev"}
+	var modalities = model_data.get("modalities", {})
+	if typeof(modalities) == TYPE_DICTIONARY and typeof(modalities.get("input")) == TYPE_ARRAY and not modalities["input"].is_empty():
+		metadata["image_input"] = "image" in modalities["input"]
 	var limits = model_data.get("limit", {})
 	if typeof(limits) == TYPE_DICTIONARY and int(limits.get("context", 0)) > 0:
 		metadata["context_window"] = int(limits["context"])

@@ -2,10 +2,11 @@
 extends RefCounted
 
 const TaskUtils = preload("res://addons/orca/scripts/task_utils.gd")
+const ImageAttachments = preload("res://addons/orca/scripts/image_attachments.gd")
 
 const SCHEMA_VERSION := 1
 const MAX_SESSIONS := 50
-const MAX_SESSION_BYTES := 4 * 1024 * 1024
+const MAX_SESSION_BYTES := 16 * 1024 * 1024
 const MAX_EVENTS := 300
 const MAX_CONTINUATION_MESSAGES := 120
 const MAX_MESSAGE_CHARS := 65536
@@ -54,11 +55,21 @@ func save_session(session: Dictionary, make_active: bool = true) -> Dictionary:
 	var sanitized := _sanitize_session(session)
 	if sanitized.is_empty():
 		return {"success": false, "error": "Session data is invalid."}
+	for collection in [session.get("events", []), session.get("continuation", [])]:
+		for item in collection:
+			if typeof(item) == TYPE_DICTIONARY and item.has("images") and (typeof(item["images"]) != TYPE_ARRAY or not ImageAttachments.validate_images(item["images"]).is_empty()):
+				return {"success": false, "error": "Invalid image data; conversation was not saved."}
+	var image_error := image_storage_error(sanitized)
+	if not image_error.is_empty():
+		return {"success": false, "error": image_error}
 	if not _ensure_storage_directory():
 		return {"success": false, "error": "Could not create the session storage directory."}
 	sanitized = _fit_session(sanitized)
 	var session_path := _session_path(str(sanitized["id"]))
-	var write_error := _atomic_write_json(session_path, sanitized)
+	var packed := _pack_images(sanitized)
+	if JSON.stringify(packed).to_utf8_buffer().size() > MAX_SESSION_BYTES:
+		return {"success": false, "error": "Conversation exceeds the bounded local storage limit."}
+	var write_error := _atomic_write_json(session_path, packed)
 	if not write_error.is_empty():
 		return {"success": false, "error": write_error}
 
@@ -111,7 +122,7 @@ func load_session(session_id: String) -> Dictionary:
 		return {}
 	if str(data.get("project_hash", "")) != _project_hash or str(data.get("id", "")) != session_id:
 		return {}
-	return _sanitize_session(data)
+	return _sanitize_session(_unpack_images(data))
 
 
 func load_active_session() -> Dictionary:
@@ -176,6 +187,12 @@ func _sanitize_session(raw: Dictionary) -> Dictionary:
 	var events: Array = []
 	var raw_events = raw.get("events", [])
 	var was_truncated := bool(raw.get("truncated", false)) or _requires_truncation(raw)
+	for collection in [raw_events, raw.get("continuation", [])]:
+		if typeof(collection) != TYPE_ARRAY:
+			continue
+		for item in collection:
+			if typeof(item) == TYPE_DICTIONARY and item.has("images") and (typeof(item["images"]) != TYPE_ARRAY or not ImageAttachments.validate_images(item["images"]).is_empty()):
+				was_truncated = true
 	if typeof(raw_events) == TYPE_ARRAY:
 		var start := maxi(0, raw_events.size() - MAX_EVENTS)
 		for index in range(start, raw_events.size()):
@@ -222,6 +239,8 @@ func _sanitize_event(raw) -> Dictionary:
 			event["kind"] = str(raw.get("kind", "assistant")) if str(raw.get("kind", "")) in ["user", "assistant", "error", "status"] else "status"
 			event["mode"] = clampi(int(raw.get("mode", 1)), 0, 1)
 			event["completion"] = str(raw.get("completion", "complete"))
+			if event["kind"] == "user" and typeof(raw.get("images")) == TYPE_ARRAY:
+				event["images"] = _sanitize_images(raw["images"])
 			return event
 		"tool":
 			event["id"] = _bounded_text(str(raw.get("id", "")), 160)
@@ -331,6 +350,8 @@ func _sanitize_continuation(raw) -> Array:
 		if role not in ["user", "assistant"] or typeof(message.get("content")) != TYPE_STRING:
 			continue
 		result.append({"role": role, "content": _bounded_text(message["content"], MAX_MESSAGE_CHARS)})
+		if role == "user" and typeof(message.get("images")) == TYPE_ARRAY:
+			result.back()["images"] = _sanitize_images(message["images"])
 	return result
 
 
@@ -355,7 +376,7 @@ func _sanitize_usage(raw) -> Dictionary:
 
 func _fit_session(session: Dictionary) -> Dictionary:
 	var fitted := session.duplicate(true)
-	while JSON.stringify(fitted).to_utf8_buffer().size() > MAX_SESSION_BYTES:
+	while JSON.stringify(_pack_images(fitted)).to_utf8_buffer().size() > MAX_SESSION_BYTES:
 		fitted["truncated"] = true
 		var events: Array = fitted.get("events", [])
 		if events.size() > 1:
@@ -367,6 +388,79 @@ func _fit_session(session: Dictionary) -> Dictionary:
 			continue
 		break
 	return fitted
+
+
+func _sanitize_images(raw: Array) -> Array:
+	var images: Array = []
+	for record in raw.slice(0, ImageAttachments.MAX_IMAGES):
+		var sanitized := ImageAttachments.sanitize_record(record)
+		if not sanitized.is_empty():
+			images.append(sanitized)
+	return images
+
+
+func _pack_images(session: Dictionary) -> Dictionary:
+	var packed := session.duplicate(true)
+	var records := {}
+	for collection in [packed.get("events", []), packed.get("continuation", [])]:
+		for item in collection:
+			if not item.has("images"):
+				continue
+			var ids: Array = []
+			for record in item["images"]:
+				records[record["id"]] = record
+				ids.append(record["id"])
+			item.erase("images")
+			item["image_ids"] = ids
+	packed["image_records"] = records
+	return packed
+
+
+func _unpack_images(session: Dictionary) -> Dictionary:
+	var unpacked := session.duplicate(true)
+	var raw_records = unpacked.get("image_records", {})
+	var records := {}
+	var byte_count := 0
+	if typeof(raw_records) == TYPE_DICTIONARY:
+		for key in raw_records:
+			if records.size() >= ImageAttachments.MAX_SESSION_IMAGES:
+				break
+			var record := ImageAttachments.sanitize_record(raw_records[key])
+			if record.is_empty() or record["id"] != key:
+				continue
+			byte_count += Marshalls.base64_to_raw(record["data"]).size()
+			if byte_count > ImageAttachments.MAX_SESSION_IMAGE_BYTES:
+				break
+			records[key] = record
+	for collection in [unpacked.get("events", []), unpacked.get("continuation", [])]:
+		if typeof(collection) != TYPE_ARRAY:
+			continue
+		for item in collection:
+			if typeof(item) != TYPE_DICTIONARY or not item.has("image_ids"):
+				continue
+			item["images"] = []
+			var ids = item["image_ids"]
+			if typeof(ids) != TYPE_ARRAY or ids.size() > ImageAttachments.MAX_IMAGES:
+				unpacked["truncated"] = true
+				continue
+			for id in ids:
+				if typeof(id) == TYPE_STRING and records.has(id):
+					item["images"].append(records[id])
+				else:
+					unpacked["truncated"] = true
+	return unpacked
+
+
+func image_storage_error(session: Dictionary, additions: Array = []) -> String:
+	var records: Dictionary = _pack_images(session).get("image_records", {})
+	for image in additions:
+		records[image["id"]] = image
+	var bytes := 0
+	for record in records.values():
+		bytes += ceili(str(record.get("data", "")).length() * 3.0 / 4.0)
+	if records.size() > ImageAttachments.MAX_SESSION_IMAGES or bytes > ImageAttachments.MAX_SESSION_IMAGE_BYTES:
+		return "This conversation has reached its image storage limit (32 images / 8 MiB). Start a new conversation."
+	return ""
 
 
 func _session_summary(session: Dictionary) -> Dictionary:

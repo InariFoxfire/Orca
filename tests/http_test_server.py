@@ -3,6 +3,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 import time
+import base64
 
 
 class ReusableHTTPServer(HTTPServer):
@@ -50,7 +51,38 @@ class Handler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         request_body = self.rfile.read(content_length)
         try:
-            if self.path.startswith("/success/"):
+            if self.path == "/image-input/chat/completions":
+                body = json.loads(request_body)
+                messages = body.get("messages", [])
+                users = [message for message in messages if message.get("role") == "user"]
+                parts = users[0].get("content", []) if users else []
+                valid = (
+                    len(parts) == 2
+                    and parts[0] == {"type": "text", "text": "Inspect image"}
+                    and parts[1].get("type") == "image_url"
+                    and "images" not in users[0]
+                )
+                url = parts[1].get("image_url", {}).get("url", "") if valid else ""
+                valid = valid and url.startswith("data:image/png;base64,")
+                if valid:
+                    decoded = base64.b64decode(url.split(",", 1)[1], validate=True)
+                    valid = decoded.startswith(b"\x89PNG\r\n\x1a\n")
+                if not valid:
+                    self._send_json_error(400, "Invalid multimodal request")
+                elif messages[-1].get("role") == "tool":
+                    if messages[-1].get("tool_call_id") != "image_tool":
+                        self._send_json_error(400, "Invalid continuation")
+                    else:
+                        self._send_sse([
+                            b'data: {"choices":[{"delta":{"content":"image continuation ok"},"finish_reason":"stop"}]}\n\n',
+                            b"data: [DONE]\n\n",
+                        ])
+                else:
+                    self._send_sse([
+                        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"image_tool","type":"function","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}\n\n',
+                        b"data: [DONE]\n\n",
+                    ])
+            elif self.path.startswith("/success/"):
                 self._send_sse([
                     b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n',
                     b'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n',

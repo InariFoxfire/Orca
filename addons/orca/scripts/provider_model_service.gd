@@ -118,6 +118,8 @@ func _merge_public_metadata(provider_id: String, models: Array[Dictionary], api_
 			if float(model.get(pair[0], pair[1])) <= float(pair[1]) and public_metadata.has(pair[0]):
 				model[pair[0]] = public_metadata[pair[0]]
 		var runtime := {}
+		if typeof(model.get("image_input")) == TYPE_BOOL:
+			runtime["image_input"] = model["image_input"]
 		for key in ["context_window", "input_per_million", "output_per_million"]:
 			if model.has(key) and float(model[key]) >= 0.0:
 				runtime[key] = model[key]
@@ -146,6 +148,8 @@ func _sanitize_cached_models(raw_models: Array) -> Array[Dictionary]:
 			"default_effort": str(raw_model.get("default_effort", "")).left(ProviderBase.MAX_MODEL_EFFORT_CHARS)
 		}
 		var efforts = raw_model.get("efforts", [])
+		if typeof(raw_model.get("image_input")) == TYPE_BOOL:
+			model["image_input"] = raw_model["image_input"]
 		if typeof(efforts) in [TYPE_ARRAY, TYPE_PACKED_STRING_ARRAY]:
 			for effort in Array(efforts).slice(0, ProviderBase.MAX_MODEL_EFFORTS):
 				var value := str(effort)

@@ -1,5 +1,7 @@
 @tool
 extends Node
+const ImageAttachments = preload("res://addons/orca/scripts/image_attachments.gd")
+const ImageCapability = preload("res://addons/orca/scripts/image_capability.gd")
 
 signal message_received(turn_id: int, role: String, content: String)
 signal error_occurred(turn_id: int, message: String)
@@ -197,9 +199,26 @@ func _init_system_prompt() -> void:
 		"content": _get_system_prompt()
 	})
 
-func send_user_message(text: String) -> void:
+func submission_error(images: Array = []) -> String:
 	if _is_running:
-		return
+		return "A request is already running."
+	var error := ImageAttachments.validate_images(images)
+	if not error.is_empty():
+		return error
+	var has_images := not images.is_empty()
+	for message in message_history:
+		if not message.get("images", []).is_empty():
+			has_images = true
+	if has_images and ImageCapability.resolve(Config.get_active_provider_config()) != "supported":
+		return "This conversation contains images. Choose a vision-capable model, or configure unconfirmed image support in Provider settings."
+	return ""
+
+
+func send_user_message(text: String, images: Array = []) -> bool:
+	if _is_running:
+		return false
+	if not submission_error(images).is_empty():
+		return false
 	_is_running = true
 	_turn_id_serial += 1
 	_active_turn_id = _turn_id_serial
@@ -219,13 +238,16 @@ func send_user_message(text: String) -> void:
 	var turn_id := _active_turn_id
 	request_state_changed.emit(turn_id, true)
 	if not _owns_turn(turn_id):
-		return
+		return true
 	_add_turn_context()
 	message_history.append({
 		"role": "user",
 		"content": text
 	})
+	if not images.is_empty():
+		message_history.back()["images"] = images.duplicate(true)
 	_send_current_request()
+	return true
 
 func _add_turn_context() -> void:
 	var sections := PackedStringArray()
@@ -350,6 +372,8 @@ func snapshot_session_state() -> Dictionary:
 		var content = message.get("content", "")
 		if typeof(content) == TYPE_STRING:
 			continuation.append({"role": role, "content": content})
+			if role == "user" and not message.get("images", []).is_empty():
+				continuation.back()["images"] = message["images"].duplicate(true)
 	return {
 		"mode": _mode,
 		"continuation": continuation,
@@ -1707,5 +1731,7 @@ func _valid_continuation(continuation: Array) -> bool:
 		if typeof(message) != TYPE_DICTIONARY:
 			return false
 		if str(message.get("role", "")) not in ["user", "assistant"] or typeof(message.get("content")) != TYPE_STRING:
+			return false
+		if message.has("images") and (message.get("role") != "user" or typeof(message["images"]) != TYPE_ARRAY or not ImageAttachments.validate_images(message["images"]).is_empty()):
 			return false
 	return true

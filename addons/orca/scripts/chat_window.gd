@@ -20,6 +20,10 @@ const SettingsView = preload("res://addons/orca/scripts/settings_view.gd")
 const SessionStore = preload("res://addons/orca/scripts/session_store.gd")
 const HistoryView = preload("res://addons/orca/scripts/history_view.gd")
 const UiMetrics = preload("res://addons/orca/scripts/ui_metrics.gd")
+const ImageAttachments = preload("res://addons/orca/scripts/image_attachments.gd")
+const ImageCapability = preload("res://addons/orca/scripts/image_capability.gd")
+const ImageAttachmentTray = preload("res://addons/orca/scripts/image_attachment_tray.gd")
+const ImageAttachmentWindow = preload("res://addons/orca/scripts/image_attachment_window.gd")
 const PROMPT_MIN_LINES := 2
 const PROMPT_MAX_LINES := 7
 const PROMPT_MAX_DOCK_RATIO := 0.28
@@ -64,6 +68,7 @@ const GROUPABLE_TOOL_NAMES := {
 @onready var mode_label: Label = $MarginContainer/VBoxContainer/Composer/ComposerContent/ComposerActions/ModeSelector/Label
 @onready var model_label: Button = $MarginContainer/VBoxContainer/Composer/ComposerContent/ComposerActions/ModelLabel
 @onready var image_button: BaseButton = $MarginContainer/VBoxContainer/Composer/ComposerContent/ComposerActions/ImageButton
+@onready var image_icon_view: TextureRect = $MarginContainer/VBoxContainer/Composer/ComposerContent/ComposerActions/ImageButton/Icon
 @onready var send_button: BaseButton = $MarginContainer/VBoxContainer/Composer/ComposerContent/ComposerActions/SendButton
 @onready var send_icon_view: TextureRect = $MarginContainer/VBoxContainer/Composer/ComposerContent/ComposerActions/SendButton/Icon
 @onready var settings_button: BaseButton = $MarginContainer/VBoxContainer/Header/TopRow/SettingsButton
@@ -130,6 +135,16 @@ var _session_resume_tainted := false
 var _request_active := false
 var _active_turn_id := 0
 var _scroll_follow_frames := 0
+var _draft_images: Array = []
+var _attachment_tray: PanelContainer
+var _image_picker: FileDialog
+var _image_preview: AcceptDialog
+var _preview_texture: TextureRect
+var _submitted_image_draft: Dictionary = {}
+var _image_drop_cue: PanelContainer
+var _image_drop_timer: Timer
+var _image_attachment_window: Window
+var _image_attachment_session_id := ""
 
 
 func _ready() -> void:
@@ -151,10 +166,13 @@ func _ready() -> void:
 	_meta_font_size = maxi(editor_font_size, 11)
 	_apply_scaled_geometry()
 	_setup_visual_theme(editor_theme)
+	_setup_image_attachments()
 	task_list_panel = TaskListPanel.new()
 	var main_column := chat_scroll.get_parent()
 	main_column.add_child(task_list_panel)
 	main_column.move_child(task_list_panel, composer.get_index())
+	task_list_panel.item_rect_changed.connect(_position_attachment_tray)
+	task_list_panel.visibility_changed.connect(_position_attachment_tray)
 	prompt_input.add_theme_font_size_override("font_size", _body_font_size + 1)
 	mode_button.add_theme_font_size_override("font_size", 1)
 	mode_label.add_theme_font_size_override("font_size", maxi(_meta_font_size - 1, 11))
@@ -247,8 +265,14 @@ func _process(_delta: float) -> void:
 
 
 func _exit_tree() -> void:
+	_close_image_attachment_window()
 	if session_store != null and not _session.is_empty() and _has_session_content:
 		_save_current_session()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_DRAG_END:
+		_hide_image_drop_cue()
 
 
 func _setup_visual_theme(editor_theme: Theme) -> void:
@@ -305,14 +329,19 @@ func _apply_scaled_geometry() -> void:
 	composer_actions.add_theme_constant_override("separation", UiMetrics.scaled_int(6))
 	mode_selector.custom_minimum_size = UiMetrics.scaled_vector(Vector2(82, 24))
 	model_label.custom_minimum_size = UiMetrics.scaled_vector(Vector2(82, 24))
-	image_button.hide()
+	image_button.show()
+	image_button.custom_minimum_size = UiMetrics.scaled_vector(Vector2(28, 28))
+	image_icon_view.offset_left = -UiMetrics.scaled(11)
+	image_icon_view.offset_top = -UiMetrics.scaled(11)
+	image_icon_view.offset_right = UiMetrics.scaled(11)
+	image_icon_view.offset_bottom = UiMetrics.scaled(11)
 	for button in [new_session_button, history_button, settings_button]:
 		button.custom_minimum_size = UiMetrics.scaled_vector(Vector2(28, 28))
 	send_button.custom_minimum_size = UiMetrics.scaled_vector(Vector2(42, 34))
-	send_icon_view.offset_left = -UiMetrics.scaled(13)
-	send_icon_view.offset_top = -UiMetrics.scaled(13)
-	send_icon_view.offset_right = UiMetrics.scaled(13)
-	send_icon_view.offset_bottom = UiMetrics.scaled(13)
+	send_icon_view.offset_left = -UiMetrics.scaled(11)
+	send_icon_view.offset_top = -UiMetrics.scaled(11)
+	send_icon_view.offset_right = UiMetrics.scaled(11)
+	send_icon_view.offset_bottom = UiMetrics.scaled(11)
 	mode_menu.custom_minimum_size.x = UiMetrics.scaled(260)
 	_scale_local_styleboxes(mode_button, ["normal", "hover", "pressed", "disabled", "focus"])
 	_scale_local_styleboxes(model_label, ["normal", "hover", "pressed", "disabled", "focus"])
@@ -369,9 +398,348 @@ func _on_prompt_focus_changed(focused: bool) -> void:
 	composer.add_theme_stylebox_override("panel", _composer_focus_style if focused else _composer_style)
 
 
+func _setup_image_attachments() -> void:
+	# MarginContainer owns its direct children's rectangles. A plain Control host
+	# keeps the positioned tray out of that layout contract and contributes no minimum size.
+	var overlay_host := Control.new()
+	overlay_host.name = "AttachmentOverlay"
+	overlay_host.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	main_content.add_child(overlay_host)
+	_attachment_tray = ImageAttachmentTray.new()
+	_attachment_tray.name = "AttachmentTray"
+	overlay_host.add_child(_attachment_tray)
+	_attachment_tray.remove_requested.connect(_remove_draft_image)
+	_attachment_tray.preview_requested.connect(_show_image_preview)
+	_attachment_tray.hide()
+	_setup_image_intake(overlay_host)
+	composer.resized.connect(_position_attachment_tray)
+	composer.item_rect_changed.connect(_position_attachment_tray)
+	_image_attachment_window = ImageAttachmentWindow.new()
+	add_child(_image_attachment_window)
+	_image_attachment_window.files_dropped.connect(_on_attachment_window_files_dropped)
+	_image_attachment_window.browse_requested.connect(_browse_attachment_images)
+	_image_attachment_window.visibility_changed.connect(_on_attachment_window_visibility_changed)
+	_image_picker = FileDialog.new()
+	_image_picker.title = "Attach images"
+	_image_picker.access = FileDialog.ACCESS_FILESYSTEM
+	_image_picker.file_mode = FileDialog.FILE_MODE_OPEN_FILES
+	_image_picker.filters = PackedStringArray(["*.png,*.jpg,*.jpeg,*.webp ; Images"])
+	_image_picker.files_selected.connect(_on_images_selected)
+	_image_attachment_window.add_child(_image_picker)
+	image_button.pressed.connect(_on_image_button_pressed)
+	_image_preview = AcceptDialog.new()
+	_image_preview.title = "Image preview"
+	_preview_texture = TextureRect.new()
+	_preview_texture.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_preview_texture.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_preview_texture.custom_minimum_size = UiMetrics.scaled_vector(Vector2(260, 240))
+	_image_preview.add_child(_preview_texture)
+	_image_preview.visibility_changed.connect(func():
+		if not _image_preview.visible:
+			_preview_texture.texture = null
+	)
+	add_child(_image_preview)
+
+
+func _on_image_button_pressed() -> void:
+	_sync_send_availability()
+	if image_button.disabled:
+		return
+	_ensure_session()
+	_image_attachment_session_id = str(_session.get("id", ""))
+	_image_attachment_window.set_state(_draft_images.size())
+	_image_attachment_window.popup_centered()
+
+
+func _browse_attachment_images() -> void:
+	if not _attachment_window_accepts_intake():
+		return
+	_image_picker.popup_centered_ratio(0.65)
+
+
+func _on_images_selected(paths: PackedStringArray) -> void:
+	# Release FileDialog's exclusive ownership before checking the intake window.
+	if _image_picker != null:
+		_image_picker.hide()
+	if _attachment_window_accepts_intake():
+		_attach_image_files(paths)
+
+
+func _image_intake_error(count: int) -> String:
+	if not _session_resumable or not prompt_input.editable or not main_content.is_visible_in_tree():
+		return "This conversation is not accepting attachments."
+	var capability := _selected_image_capability()
+	if capability != "supported":
+		return "This model does not support image input." if capability == "unsupported" else "Image support is unconfirmed. Configure it in Provider settings."
+	if count <= 0 or count + _draft_images.size() > ImageAttachments.MAX_IMAGES:
+		return "Attach at most four images per message."
+	return ""
+
+
+func _selected_image_capability() -> String:
+	return ImageCapability.resolve(Config.get_active_provider_config())
+
+
+func _attach_image_files(paths: PackedStringArray) -> bool:
+	var error := _image_intake_error(paths.size())
+	if error.is_empty():
+		error = _image_file_paths_error(paths)
+	if not error.is_empty():
+		_show_image_intake_error(error)
+		return false
+	var prepared: Array = []
+	for path in paths:
+		var result := _prepare_image_file(path)
+		if not result.get("success", false):
+			_show_image_intake_error(str(result.get("error", "Could not prepare image.")))
+			return false
+		prepared.append(result["image"])
+	return _accept_prepared_images(prepared)
+
+
+func _prepare_image_file(path: String) -> Dictionary:
+	return ImageAttachments.prepare_file(path)
+
+
+func _accept_prepared_images(prepared: Array) -> bool:
+	var error := _image_intake_error(prepared.size())
+	if error.is_empty() and session_store != null:
+		error = session_store.image_storage_error(_session, _draft_images + prepared)
+	if not error.is_empty():
+		_show_image_intake_error(error)
+		return false
+	_draft_images.append_array(prepared)
+	_refresh_attachment_tray()
+	return true
+
+
+func _show_image_intake_error(message: String) -> void:
+	if _image_attachment_window != null and _image_attachment_window.visible:
+		_image_attachment_window.set_state(_draft_images.size(), message)
+	else:
+		_add_message("Attachments", message, Color.INDIAN_RED, "error")
+
+
+func _clipboard_has_image() -> bool:
+	return DisplayServer.has_feature(DisplayServer.FEATURE_CLIPBOARD) and DisplayServer.clipboard_has_image()
+
+
+func _clipboard_image() -> Image:
+	return DisplayServer.clipboard_get_image()
+
+
+func _try_paste_image() -> bool:
+	# No clipboard polling: this callback runs only for an explicit composer Paste.
+	if not _clipboard_has_image():
+		return false
+	var error := _image_intake_error(1)
+	if not error.is_empty():
+		_show_image_intake_error(error)
+		return true
+	var result := ImageAttachments.prepare_image(_clipboard_image(), "Pasted image.png")
+	if result.get("success", false):
+		_accept_prepared_images([result["image"]])
+	else:
+		_show_image_intake_error(str(result.get("error", "Could not read clipboard image.")))
+	return true
+
+
+func _image_file_paths_error(paths: PackedStringArray) -> String:
+	for path in paths:
+		if path.length() > 4096 or path.to_utf8_buffer().has(0) or path.get_extension().to_lower() not in ["png", "jpg", "jpeg", "webp"]:
+			return "Drop PNG, JPEG, or WebP still-image files only."
+		if not path.begins_with("res://") and (not path.is_absolute_path() or path.contains("://")):
+			return "Only local image files can be attached."
+	return ""
+
+
+func _image_paths_from_drag(data) -> PackedStringArray:
+	if typeof(data) != TYPE_DICTIONARY or data.get("type") not in ["files", "files_and_dirs"]:
+		return PackedStringArray()
+	var files = data.get("files")
+	if typeof(files) not in [TYPE_ARRAY, TYPE_PACKED_STRING_ARRAY] or files.is_empty() or files.size() > ImageAttachments.MAX_IMAGES:
+		return PackedStringArray()
+	var paths := PackedStringArray()
+	for file in files:
+		if typeof(file) != TYPE_STRING:
+			return PackedStringArray()
+		paths.append(file)
+	return paths if _image_file_paths_error(paths).is_empty() else PackedStringArray()
+
+
+func _setup_image_intake(overlay_host: Control) -> void:
+	prompt_input.image_paste_handler = _try_paste_image
+	for target in [prompt_input, composer]:
+		target.set_drag_forwarding(Callable(), _can_drop_image_data.bind(target), _drop_image_data.bind(target))
+	for target in [composer_content, composer_actions, mode_selector, mode_button, model_label, image_button, send_button]:
+		target.set_drag_forwarding(Callable(), _can_drop_image_data.bind(target), _drop_image_data.bind(target))
+	_image_drop_cue = PanelContainer.new()
+	_image_drop_cue.name = "ImageDropCue"
+	_image_drop_cue.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.12, 0.125, 0.14, 0.97)
+	style.border_color = Color(0.46, 0.48, 0.52)
+	style.set_border_width_all(UiMetrics.scaled_int(1))
+	style.set_corner_radius_all(UiMetrics.scaled_int(8))
+	style.set_content_margin_all(UiMetrics.scaled(8))
+	_image_drop_cue.add_theme_stylebox_override("panel", style)
+	var label := Label.new()
+	label.text = "Drop images to attach"
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	label.add_theme_font_size_override("font_size", _meta_font_size)
+	_image_drop_cue.add_child(label)
+	overlay_host.add_child(_image_drop_cue)
+	_image_drop_cue.hide()
+	_image_drop_timer = Timer.new()
+	_image_drop_timer.one_shot = true
+	_image_drop_timer.wait_time = 0.15
+	_image_drop_timer.timeout.connect(_refresh_image_drop_cue)
+	add_child(_image_drop_timer)
+	main_content.visibility_changed.connect(_hide_image_drop_cue)
+	main_content.visibility_changed.connect(func():
+		if not main_content.is_visible_in_tree():
+			_close_image_attachment_window()
+	)
+
+
+func _can_drop_image_data(_position: Vector2, data, target: Control) -> bool:
+	var paths := _image_paths_from_drag(data)
+	var accepted := target.is_visible_in_tree() and not paths.is_empty() and _image_intake_error(paths.size()).is_empty() and get_last_exclusive_window() == get_window()
+	if accepted:
+		_image_drop_cue.size = prompt_input.size
+		_image_drop_cue.global_position = prompt_input.global_position
+		_image_drop_cue.show()
+		_image_drop_timer.start()
+	else:
+		_hide_image_drop_cue()
+	return accepted
+
+
+func _drop_image_data(_position: Vector2, data, _target: Control) -> void:
+	_hide_image_drop_cue()
+	if not _target.is_visible_in_tree() or get_last_exclusive_window() != get_window():
+		return
+	var paths := _image_paths_from_drag(data)
+	if not paths.is_empty():
+		_attach_image_files(paths)
+
+
+func _hide_image_drop_cue() -> void:
+	if _image_drop_cue != null:
+		_image_drop_cue.hide()
+	if _image_drop_timer != null:
+		_image_drop_timer.stop()
+
+
+func _refresh_image_drop_cue() -> void:
+	if get_viewport().gui_is_dragging() and Rect2(Vector2.ZERO, composer.size).has_point(composer.get_local_mouse_position()):
+		_can_drop_image_data(Vector2.ZERO, get_viewport().gui_get_drag_data(), composer)
+	else:
+		_hide_image_drop_cue()
+
+
+func _attachment_window_accepts_intake() -> bool:
+	if not is_instance_valid(_image_attachment_window) or not _image_attachment_window.visible or not main_content.is_visible_in_tree():
+		return false
+	if _image_attachment_session_id.is_empty() or _image_attachment_session_id != str(_session.get("id", "")):
+		return false
+	if get_last_exclusive_window() != get_window():
+		return false
+	if (_image_preview != null and _image_preview.visible) or mode_overlay.visible or (_new_session_dialog != null and _new_session_dialog.visible):
+		return false
+	return true
+
+
+func _on_attachment_window_files_dropped(paths: PackedStringArray) -> void:
+	if _attachment_window_accepts_intake() and not _image_picker.visible:
+		_attach_image_files(paths)
+
+
+func _on_attachment_window_visibility_changed() -> void:
+	if not _image_attachment_window.visible:
+		_image_attachment_session_id = ""
+		if _image_picker != null:
+			_image_picker.hide()
+
+
+func _close_image_attachment_window() -> void:
+	_image_attachment_session_id = ""
+	if is_instance_valid(_image_picker):
+		_image_picker.hide()
+	if is_instance_valid(_image_attachment_window):
+		_image_attachment_window.hide()
+
+
+func _remove_draft_image(index: int) -> void:
+	if index >= 0 and index < _draft_images.size():
+		_draft_images.remove_at(index)
+	_refresh_attachment_tray()
+
+
+func _refresh_attachment_tray() -> void:
+	if _attachment_tray == null:
+		return
+	_attachment_tray.configure(_draft_images)
+	if _image_attachment_window != null:
+		_image_attachment_window.set_state(_draft_images.size())
+	call_deferred("_position_attachment_tray")
+	_sync_send_availability()
+
+
+func _position_attachment_tray() -> void:
+	if _attachment_tray == null or not is_instance_valid(composer):
+		return
+	var thumbnail_width := UiMetrics.scaled(_draft_images.size() * 56 + maxi(0, _draft_images.size() - 1) * 8 + 8)
+	_attachment_tray.size = Vector2(minf(composer.size.x, thumbnail_width), UiMetrics.scaled(64))
+	var anchor := composer.global_position
+	if task_list_panel != null and task_list_panel.visible:
+		anchor.y = minf(anchor.y, task_list_panel.global_position.y)
+	_attachment_tray.global_position = anchor - Vector2(0, UiMetrics.scaled(68))
+
+
+func _show_image_preview(record: Dictionary) -> void:
+	_preview_texture.texture = ImageAttachments.texture(record)
+	_image_preview.title = str(record.get("name", "Image"))
+	_image_preview.popup_centered_ratio(0.7)
+
+
+func _add_message_images(label: RichTextLabel, images: Array) -> void:
+	if images.is_empty():
+		return
+	var panel := label.get_parent()
+	panel.remove_child(label)
+	var content := VBoxContainer.new()
+	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.add_child(content)
+	content.add_child(label)
+	var tray := ImageAttachmentTray.new()
+	content.add_child(tray)
+	tray.configure(images, false)
+	tray.preview_requested.connect(_show_image_preview)
+
+
 func _sync_send_availability() -> void:
-	send_button.disabled = not _request_active and (not _session_resumable or prompt_input.text.strip_edges().is_empty())
+	send_button.disabled = not _request_active and (not _session_resumable or (prompt_input.text.strip_edges().is_empty() and _draft_images.is_empty()))
+	_sync_image_button(_selected_image_capability())
 	_sync_send_icon_tint(_request_active)
+
+
+func _sync_image_button(capability: String) -> void:
+	image_button.disabled = not _session_resumable or capability != "supported" or _draft_images.size() >= ImageAttachments.MAX_IMAGES
+	image_icon_view.self_modulate = Color(0.34, 0.36, 0.39, 0.55) if image_button.disabled else Color(0.8, 0.82, 0.85)
+	image_button.mouse_default_cursor_shape = Control.CURSOR_ARROW if image_button.disabled else Control.CURSOR_POINTING_HAND
+	if not _session_resumable:
+		image_button.tooltip_text = "This saved conversation is view-only."
+	elif capability == "unsupported":
+		image_button.tooltip_text = "This model does not support image input."
+	elif capability != "supported":
+		image_button.tooltip_text = "Image support is unconfirmed. Configure it in Provider settings."
+	elif _draft_images.size() >= ImageAttachments.MAX_IMAGES:
+		image_button.tooltip_text = "Four images attached. Remove an image to add another."
+	else:
+		image_button.tooltip_text = "%s supports image input. Opens a separate drop/Browse window. Paste screenshots or drag project images onto the input. Dropping desktop files on the main editor imports them; use the attachment window instead." % Config.get_model()
 
 
 func _sync_send_icon_tint(request_active: bool) -> void:
@@ -421,13 +789,23 @@ func _on_send_button_pressed() -> void:
 	if not _session_resumable:
 		return
 	var text := prompt_input.text.strip_edges()
-	if text.is_empty():
+	if text.is_empty() and _draft_images.is_empty():
 		return
+	var attachment_error: String = agent_controller.submission_error(_draft_images)
+	if attachment_error.is_empty():
+		attachment_error = session_store.image_storage_error(_session, _draft_images)
+	if not attachment_error.is_empty():
+		_add_message("Attachments", attachment_error, Color.INDIAN_RED, "error")
+		return
+	var images := _draft_images.duplicate(true)
+	var previous_session := _session.duplicate(true)
+	_submitted_image_draft = {"text": text, "images": images} if not images.is_empty() else {}
 	_clear_prompt_input()
 	prompt_input.placeholder_text = "Describe what you want to build or fix..."
 	_has_session_content = true
 	_sync_metrics_visibility()
-	_add_message("User", text, Color.LIGHT_SKY_BLUE, "user")
+	var user_label := _add_message("User", text, Color.LIGHT_SKY_BLUE, "user")
+	_add_message_images(user_label, images)
 	_ensure_session()
 	if str(_session.get("last_prompt", "")).is_empty():
 		_session["title"] = _session_title(text)
@@ -439,10 +817,27 @@ func _on_send_button_pressed() -> void:
 	_session["resumable"] = not _session_resume_tainted
 	_turn_had_tools = false
 	_turn_had_mode_request = false
-	_append_session_event(_message_event("User", text, "user", "complete"))
+	var event := _message_event("User", text, "user", "complete")
+	if not images.is_empty():
+		event["images"] = images
+	_append_session_event(event)
 	_set_request_active(true)
 	_show_working_indicator("Thinking")
-	agent_controller.send_user_message(text)
+	_draft_images.clear()
+	_refresh_attachment_tray()
+	if not agent_controller.send_user_message(text, images):
+		_set_request_active(false)
+		_remove_transient_card()
+		if prompt_input.text.is_empty() and _draft_images.is_empty():
+			prompt_input.text = text
+			_draft_images = images
+			_refresh_attachment_tray()
+		var user_panel := user_label.get_parent().get_parent() if not images.is_empty() else user_label.get_parent()
+		user_panel.queue_free()
+		_session = previous_session
+		_submitted_image_draft.clear()
+		_add_message("Attachments", "Submission was not accepted. Your draft has been kept.", Color.INDIAN_RED, "error")
+		return
 	_save_current_session()
 
 
@@ -770,6 +1165,7 @@ func _on_help_requested(topic: String) -> void:
 
 
 func _on_agent_message_received(_role: String, content: String) -> void:
+	_submitted_image_draft.clear()
 	_close_active_tool_group()
 	_set_request_active(false)
 	_remove_transient_card()
@@ -795,6 +1191,11 @@ func _on_agent_message_received(_role: String, content: String) -> void:
 
 
 func _on_agent_error_occurred(message: String) -> void:
+	if not _submitted_image_draft.is_empty() and not _turn_had_tools and not _turn_had_mode_request and _draft_images.is_empty() and prompt_input.text.is_empty():
+		prompt_input.text = str(_submitted_image_draft.get("text", ""))
+		_draft_images = _submitted_image_draft.get("images", []).duplicate(true)
+		_refresh_attachment_tray()
+	_submitted_image_draft.clear()
 	_set_request_active(false)
 	_remove_transient_card()
 	var recovered: bool = (_turn_had_tools or _turn_had_mode_request) and agent_controller != null and agent_controller.has_method("last_failure_was_checkpointed") and bool(agent_controller.last_failure_was_checkpointed())
@@ -1002,9 +1403,11 @@ func _on_settings_done() -> void:
 
 
 func _sync_model_ui() -> void:
+	_close_image_attachment_window()
 	var model := Config.get_model().strip_edges()
 	model_label.text = model if not model.is_empty() else "No model"
 	model_label.tooltip_text = "Current model: %s\nClick to configure" % model_label.text
+	_sync_send_availability()
 
 
 func _refresh_model_metadata() -> void:
@@ -1013,6 +1416,7 @@ func _refresh_model_metadata() -> void:
 
 func _on_model_metadata_updated() -> void:
 	agent_controller.refresh_session_usage()
+	_sync_send_availability()
 
 
 func _on_new_session_pressed() -> void:
@@ -1025,6 +1429,7 @@ func _on_new_session_pressed() -> void:
 
 
 func _start_new_session() -> void:
+	_close_image_attachment_window()
 	if not _save_current_session():
 		return
 	if not session_store.set_active_session(""):
@@ -1050,6 +1455,9 @@ func _start_new_session() -> void:
 		task_list_panel.clear()
 	_clear_prompt_input()
 	prompt_input.editable = true
+	_draft_images.clear()
+	_refresh_attachment_tray()
+	_submitted_image_draft.clear()
 	prompt_input.placeholder_text = "Describe what you want to build or fix..."
 	_has_session_content = false
 	_sync_metrics_visibility()
@@ -1078,6 +1486,7 @@ func _restore_active_session() -> void:
 
 
 func _restore_session(session: Dictionary) -> bool:
+	_close_image_attachment_window()
 	var resumable := bool(session.get("clean", true)) and bool(session.get("resumable", true)) and not bool(session.get("truncated", false))
 	var previous_session_id := str(_session.get("id", ""))
 	if not session_store.set_active_session(str(session.get("id", ""))):
@@ -1086,6 +1495,9 @@ func _restore_session(session: Dictionary) -> bool:
 		session_store.set_active_session(previous_session_id)
 		return false
 	_session = session.duplicate(true)
+	_draft_images.clear()
+	_submitted_image_draft.clear()
+	_refresh_attachment_tray()
 	if task_list_panel != null:
 		task_list_panel.set_tasks(_session.get("tasks", []))
 	_session_resumable = resumable
@@ -1357,7 +1769,9 @@ func _render_session_event(event: Dictionary) -> void:
 			if kind == "assistant" and completion in ["complete", "tool_preface"]:
 				_add_final_assistant_message(sender, text, color)
 			else:
-				_add_message(sender, text, color, kind)
+				var label := _add_message(sender, text, color, kind)
+				if kind == "user":
+					_add_message_images(label, event.get("images", []))
 		"tool":
 			var tool_name := str(event.get("name", ""))
 			var call_id := str(event.get("id", ""))

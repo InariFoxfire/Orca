@@ -72,6 +72,9 @@ func normalize_models(response) -> Array[Dictionary]:
 			"efforts": _normalize_efforts(item),
 			"default_effort": _default_effort(item)
 		})
+		var modalities = item.get("input_modalities", item.get("architecture", {}).get("input_modalities", null) if typeof(item.get("architecture")) == TYPE_DICTIONARY else null)
+		if typeof(modalities) == TYPE_ARRAY and not modalities.is_empty():
+			models.back()["image_input"] = "image" in modalities
 	models.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return str(a["name"]).naturalnocasecmp_to(str(b["name"])) < 0)
 	return models
 

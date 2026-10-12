@@ -100,6 +100,8 @@ func _normalize_ollama_models(response) -> Array[Dictionary]:
 			continue
 		var details = item.get("details", {})
 		models.append(_model_record(model_id, display_name, int(details.get("context_length", 0)) if typeof(details) == TYPE_DICTIONARY else 0))
+		if typeof(capabilities) == TYPE_ARRAY and not capabilities.is_empty():
+			models.back()["image_input"] = "vision" in capabilities
 	_sort_models(models)
 	return models
 
@@ -126,6 +128,9 @@ func _normalize_lmstudio_models(response) -> Array[Dictionary]:
 			continue
 		var context := _lmstudio_context(item)
 		models.append(_model_record(model_id, display_name, context))
+		var capabilities = item.get("capabilities", {})
+		if typeof(capabilities) == TYPE_DICTIONARY and typeof(capabilities.get("vision")) == TYPE_BOOL:
+			models.back()["image_input"] = capabilities["vision"]
 	_sort_models(models)
 	return models
 

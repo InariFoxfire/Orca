@@ -2,7 +2,7 @@
 
 ## Supported Version
 
-Security fixes are applied to the current 1.2.x release line.
+Security fixes are applied to the current 1.3.x release line.
 
 ## Reporting A Vulnerability
 
@@ -26,6 +26,9 @@ Orca is designed to reduce accidental project changes, not to sandbox arbitrary 
 - Project paths are restricted to `res://`; symbolic links and Orca's own addon directory are rejected by agent tools.
 - API credentials are stored in Godot Editor Settings, which is not an encrypted OS credential manager.
 - Session transcripts are stored locally as plaintext JSON and can contain prompts and visible assistant responses.
+- Submitted image attachments are sent to the selected AI endpoint and retained as bounded, deduplicated plaintext session data under `user://`; conversation deletion and retention remove them. Pending image drafts are memory-only. Source paths and original image metadata are not retained.
+- Image intake is explicit (picker, Paste, or drop), checks format/dimension/count/size limits, and prepares normalized PNG data. Vision support is checked separately from Agent-tool compatibility; an explicit unknown-profile setting is a user assertion, not a vision-quality probe. Godot decodes clipboard pixels before Orca can check the returned dimensions.
+- Desktop attachments use an Orca-owned separate native drop/Browse window. Desktop files dropped onto the main editor/dock still follow Godot's own project import behavior. Orca does not replace editor drop callbacks, delete imported project assets, or silently redirect project writes.
 - Project context and file contents may be sent to the configured model provider. Use only providers and endpoints you trust.
 - Editable endpoints are strictly parsed and normalized. Loopback endpoints may use HTTP without confirmation; LAN and remote endpoints require explicit confirmation bound to their exact scheme, host, and effective port before credentials, prompts, or project context can be sent.
 - Changing a confirmed endpoint's scheme, host, or port requires confirmation again. Plain HTTP outside loopback is explicitly identified as unencrypted. Confirmation is informed consent, not certificate pinning, DNS pinning, or proof that the server will not forward received data.

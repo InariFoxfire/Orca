@@ -28,11 +28,19 @@ func _run() -> void:
 
 	_expect(view.settings_scroll.visible and not view.about_scroll.visible, "provider settings should be the default section")
 	_expect(view.provider_tab_button.button_pressed and not view.about_tab_button.button_pressed, "the Provider tab should be selected by default")
+	for button in [view.provider_tab_button, view.system_tab_button, view.about_tab_button]:
+		_expect(button.icon != null and button.text.is_empty() and not button.tooltip_text.is_empty(), "section navigation should use labeled icon buttons")
+	view.system_tab_button.emit_signal("pressed")
+	await process_frame
+	_expect(view.system_scroll.visible and not view.settings_scroll.visible and not view.about_scroll.visible, "System should replace the other sections")
+	_expect(view.system_tab_button.button_pressed and not view.provider_tab_button.button_pressed and not view.about_tab_button.button_pressed, "only System should be selected")
+	_expect(view.language_selector.item_count == 1 and view.language_selector.get_item_text(0) == "English" and view.language_selector.selected == 0 and view.language_selector.disabled, "language should display English without offering unsupported choices")
+	_expect(view.get_combined_minimum_size().x <= 300.0, "System should fit the 300 px dock width")
 	view.about_tab_button.emit_signal("pressed")
 	await process_frame
-	_expect(not view.settings_scroll.visible and view.about_scroll.visible, "the About tab should replace provider settings")
+	_expect(not view.settings_scroll.visible and not view.system_scroll.visible and view.about_scroll.visible, "the About tab should replace other settings")
 	_expect(view.about_tab_button.button_pressed, "the About tab should show its selected state")
-	_expect(view.about_version_label.text == "Version 1.2.1", "the About page should read the release version from plugin.cfg")
+	_expect(view.about_version_label.text == "Version 1.3.0", "the About page should read the release version from plugin.cfg")
 	var compatibility := view.find_child("AboutCompatibility", true, false) as Label
 	var license := view.find_child("AboutLicense", true, false) as Label
 	var logo := view.find_child("AboutLogo", true, false) as TextureRect
@@ -43,9 +51,21 @@ func _run() -> void:
 	_expect(logo != null and logo.texture != null, "the About page should display the Orca mark")
 	_expect(support_description != null and support_description.text.contains("strict-allowlist") and support_description.text.contains("excludes credentials"), "the About page should disclose the diagnostic report's privacy boundary")
 	_expect(copy_report != null, "the About page should expose the privacy-safe diagnostic copy action")
+	for link in [
+		["AboutDocsLink", "https://www.aiorca.dev/docs/"],
+		["AboutWebsiteLink", "https://www.aiorca.dev/"],
+		["AboutGitHubLink", "https://github.com/cold-atom/Orca"],
+		["AboutIssuesLink", "https://github.com/cold-atom/Orca/issues"],
+		["AboutDiscussionsLink", "https://github.com/cold-atom/Orca/discussions"],
+	]:
+		var button := view.find_child(link[0], true, false) as Button
+		_expect(button != null and button.tooltip_text.contains(link[1]) and not button.accessibility_name.is_empty(), "About should expose named browser links with exact destinations")
+		if button != null:
+			var connections := button.pressed.get_connections()
+			_expect(connections.size() == 1 and connections[0]["callable"].get_bound_arguments() == [link[1]], "each About action should open its exact static URL only on click")
 	view.set_support_request_metadata({"provider_type": "openai", "outcome": "failed", "interaction_mode": "work", "stage": "initial", "tools_offered": true, "failure_category": "timeout", "transport_phase": "receiving_response", "message": "PRIVATE_ERROR_SENTINEL", "base_url": "https://private.example"})
 	var report_text: String = view.diagnostic_report_text()
-	_expect(report_text.contains("\"orca_version\": \"1.2.1\"") and report_text.contains("\"failure_category\": \"timeout\""), "the About action should generate versioned coarse request diagnostics")
+	_expect(report_text.contains("\"orca_version\": \"1.3.0\"") and report_text.contains("\"failure_category\": \"timeout\""), "the About action should generate versioned coarse request diagnostics")
 	_expect(not report_text.contains("PRIVATE_ERROR_SENTINEL") and not report_text.contains("private.example"), "the About report must not serialize unknown request or endpoint fields")
 	view._on_copy_support_report_pressed()
 	_expect(view.support_report_status.text == "Copied diagnostic report.", "copying diagnostics should provide visible confirmation")

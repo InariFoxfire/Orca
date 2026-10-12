@@ -162,7 +162,7 @@ func _test_compact_composer(view) -> void:
 	_expect(is_equal_approx(view.prompt_input.custom_minimum_size.y, ceilf(expected_minimum)), "an empty composer should use the configured compact line count")
 	_expect(view.prompt_input.custom_minimum_size.y < 110.0, "an empty composer must not retain the old fixed 110 px floor at 100% scale")
 	var image_button := view.get_node("MarginContainer/VBoxContainer/Composer/ComposerContent/ComposerActions/ImageButton") as BaseButton
-	_expect(not image_button.visible, "the unavailable image action should not reserve narrow composer width")
+	_expect(image_button.visible, "image attachment action should be discoverable in the composer")
 	var actions := view.get_node("MarginContainer/VBoxContainer/Composer/ComposerContent/ComposerActions") as HBoxContainer
 	var actions_rect := actions.get_global_rect()
 	for child in actions.get_children():

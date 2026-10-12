@@ -1,5 +1,7 @@
 @tool
 extends Node
+const ImageAttachments = preload("res://addons/orca/scripts/image_attachments.gd")
+const ImageCapability = preload("res://addons/orca/scripts/image_capability.gd")
 
 const ProviderRegistry = preload("res://addons/orca/scripts/provider_registry.gd")
 const EndpointPolicy = preload("res://addons/orca/scripts/endpoint_policy.gd")
@@ -118,9 +120,25 @@ func send_chat_completion(messages: Array, tools: Array = [], provider_config: D
 		request_failed.emit(lifecycle_request_id, _make_error("Invalid API URL. Use a complete http:// or https:// URL.", "configuration", false))
 		return
 
+	var has_images := false
+	for message in messages:
+		if typeof(message) != TYPE_DICTIONARY:
+			continue
+		if typeof(message.get("images", [])) != TYPE_ARRAY:
+			request_failed.emit(lifecycle_request_id, _make_error("Invalid image attachments.", "configuration", false))
+			return
+		var images: Array = message.get("images", [])
+		var image_error := ImageAttachments.validate_images(images)
+		if not image_error.is_empty() or (not images.is_empty() and message.get("role") != "user"):
+			request_failed.emit(lifecycle_request_id, _make_error("Invalid image attachments.", "configuration", false))
+			return
+		has_images = has_images or not images.is_empty()
+	if has_images and ImageCapability.resolve(request_config) != "supported":
+		request_failed.emit(lifecycle_request_id, _make_error("The selected model/endpoint does not have confirmed image input support.", "configuration", false))
+		return
 	var body = {
 		"model": request_config.get("model", ""),
-		"messages": provider.sanitize_messages(messages),
+		"messages": provider.sanitize_messages(ImageAttachments.request_messages(messages)),
 		"stream": true,
 		"stream_options": {"include_usage": true}
 	}
@@ -128,6 +146,9 @@ func send_chat_completion(messages: Array, tools: Array = [], provider_config: D
 		body["tools"] = tools
 		body["tool_choice"] = "auto"
 	provider.apply_chat_options(body, str(request_config.get("reasoning_effort", "default")))
+	if JSON.stringify(body).to_utf8_buffer().size() > ImageAttachments.MAX_REQUEST_BYTES:
+		request_failed.emit(lifecycle_request_id, _make_error("The request exceeds the 16 MiB request limit. Start a new conversation or reduce attachments.", "configuration", false))
+		return
 
 	_reset_stream_state()
 	_generation_deadline_ms = 0

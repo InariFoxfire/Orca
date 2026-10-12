@@ -4,6 +4,47 @@ All notable changes to Orca are documented in this file.
 
 ## Unreleased
 
+## 1.3.0 - 2026-10-13
+
+### Added
+
+- Image attachments for vision-capable models: PNG, JPEG, and WebP still images, up to four per message, with floating thumbnails, removal, larger previews, and previews in submitted/restored messages.
+- Image clipboard Paste through keyboard shortcuts and the context menu, plus existing project-image drag-and-drop from Godot's FileSystem dock.
+- A separate native attachment window with desktop drag-and-drop and Browse, keeping attachments outside project files.
+- Model/endpoint-specific supported, unsupported, and unknown image capability, with an explicit exact-profile setting for unconfirmed input support independent of Agent tools.
+- Multimodal Chat Completions requests, conservative image context reserves, and deduplicated project-scoped conversation image persistence.
+- A System settings section with English shown as the sole supported language.
+- About-page links to Orca documentation, website, GitHub, issue reporting, and community feature discussions.
+
+### Changed
+
+- Replaced Settings text tabs with neutral icon-based Provider, System, and About navigation, tooltips, and keyboard focus.
+- Balanced image and Send artwork at the same 22 px editor-scaled size and made unavailable image input visibly dimmed and non-clickable.
+- Draft attachments float above the composer without shrinking the conversation or moving the input; individual thumbnail frames use a transparent surrounding surface.
+- Image preparation checks bounded source headers before decoding, normalizes metadata-free PNG data, and caps prepared images at 2048 pixels per side and 1 MiB each.
+- Saved conversations retain at most 32 unique images / 8 MiB decoded image data within a 16 MiB session JSON limit; missing or corrupt image references make restoration view-only.
+- DeepSeek image support is model-specific: current Flash supports vision, while Pro and legacy Chat/Reasoner have text-only fallbacks on the canonical endpoint.
+
+### Fixed
+
+- Fixed attachment trays stretching across the dock during deferred editor layout.
+- Fixed About link descriptions overflowing their clickable backgrounds and overlapping adjacent rows under editor fonts; content drives row height and descriptions wrap.
+- Guarded attachment-window intake against changed sessions, unsupported profiles, modal/hidden views, and late selections after close while preserving existing drafts.
+
+### Tests
+
+- Added preparation/corruption, model capability, budgeting, persistence/deletion, draft lifecycle, clipboard/text undo, atomic intake, and real Control drag-routing regressions.
+- Added real localhost multimodal SSE transport coverage retaining image context across a tool continuation.
+- Added a Linux/X11 native desktop-drop fixture verifying accepted/rejected transfers and cancelled late intake with zero project-file changes.
+- Expanded editor layout checks for thumbnail overlays, matching icon sizes, unavailable controls, and About link containment at normal, 1.5×, and 2× font sizes.
+
+### Known Limits
+
+- Desktop images must be dropped into Orca's separate attachment window. Files dropped directly onto the main Godot editor/dock still invoke Godot's import handler; seamless cancellable routing is future work.
+- Native desktop-drop isolation was verified on Linux/X11/Vulkan. Other platforms/renderers, detached editor windows, and real OS clipboard behavior need further acceptance testing.
+- Image capability metadata and explicit overrides do not establish live-model vision quality. No new live-provider vision gate was run for this release preparation; the previously documented selected-model Gemini continuation risk remains unresolved.
+- Document/PDF attachment, OCR, automated screenshots, and additional UI languages are not included. Pending draft attachments remain memory-only; submitted images are plaintext local conversation data and are sent to the selected AI endpoint with the request.
+
 ## 1.2.1 - 2026-10-07
 
 ### Changed

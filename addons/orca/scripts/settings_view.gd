@@ -11,8 +11,12 @@ const EndpointPolicy = preload("res://addons/orca/scripts/endpoint_policy.gd")
 const AgentCompatibilityProbe = preload("res://addons/orca/scripts/agent_compatibility_probe.gd")
 const SupportDiagnosticReport = preload("res://addons/orca/scripts/support_diagnostic_report.gd")
 const UiMetrics = preload("res://addons/orca/scripts/ui_metrics.gd")
+const ImageCapability = preload("res://addons/orca/scripts/image_capability.gd")
 const PLUGIN_CONFIG_PATH := "res://addons/orca/plugin.cfg"
 const ABOUT_LOGO_PATH := "res://addons/orca/assets/orca.svg"
+const PROVIDER_ICON = preload("res://addons/orca/assets/providerconfig.svg")
+const SYSTEM_ICON = preload("res://addons/orca/assets/systems.svg")
+const ABOUT_ICON = preload("res://addons/orca/assets/about.svg")
 const SUPPORTED_GODOT_VERSION := "4.7.2"
 
 var provider_selector: OptionButton
@@ -39,8 +43,12 @@ var done_button: Button
 var refresh_button: Button
 var settings_scroll: ScrollContainer
 var about_scroll: ScrollContainer
+var system_scroll: ScrollContainer
 var provider_tab_button: Button
+var system_tab_button: Button
 var about_tab_button: Button
+var language_selector: OptionButton
+var image_support_toggle: CheckButton
 var about_version_label: Label
 var support_report_status: Label
 var _trust_dialog: ConfirmationDialog
@@ -137,16 +145,31 @@ func _build_ui() -> void:
 	header.add_child(done_button)
 	root.add_child(HSeparator.new())
 
+	var navigation := PanelContainer.new()
+	navigation.name = "SectionNavigation"
+	var navigation_style := StyleBoxFlat.new()
+	navigation_style.bg_color = Color(0.115, 0.12, 0.13)
+	navigation_style.set_corner_radius_all(UiMetrics.scaled_int(8))
+	navigation_style.content_margin_left = UiMetrics.scaled(4)
+	navigation_style.content_margin_right = UiMetrics.scaled(4)
+	navigation_style.content_margin_top = UiMetrics.scaled(4)
+	navigation_style.content_margin_bottom = UiMetrics.scaled(4)
+	navigation.add_theme_stylebox_override("panel", navigation_style)
+	root.add_child(navigation)
 	var tab_row := HBoxContainer.new()
-	tab_row.add_theme_constant_override("separation", UiMetrics.scaled_int(6))
-	root.add_child(tab_row)
+	tab_row.add_theme_constant_override("separation", UiMetrics.scaled_int(4))
+	navigation.add_child(tab_row)
 	var tab_group := ButtonGroup.new()
 	tab_group.allow_unpress = false
-	provider_tab_button = _section_tab("Provider", tab_group)
+	provider_tab_button = _section_tab("Provider", PROVIDER_ICON, tab_group)
 	provider_tab_button.name = "ProviderTab"
 	provider_tab_button.pressed.connect(_show_section.bind("provider"))
 	tab_row.add_child(provider_tab_button)
-	about_tab_button = _section_tab("About", tab_group)
+	system_tab_button = _section_tab("System", SYSTEM_ICON, tab_group)
+	system_tab_button.name = "SystemTab"
+	system_tab_button.pressed.connect(_show_section.bind("system"))
+	tab_row.add_child(system_tab_button)
+	about_tab_button = _section_tab("About", ABOUT_ICON, tab_group)
 	about_tab_button.name = "AboutTab"
 	about_tab_button.pressed.connect(_show_section.bind("about"))
 	tab_row.add_child(about_tab_button)
@@ -226,6 +249,12 @@ func _build_ui() -> void:
 	custom_model_input.placeholder_text = "Model ID"
 	custom_model_input.text_changed.connect(_on_manual_model_changed)
 	content.add_child(custom_model_input)
+	image_support_toggle = CheckButton.new()
+	image_support_toggle.text = "Enable unconfirmed image input"
+	image_support_toggle.clip_text = true
+	image_support_toggle.tooltip_text = "Use only if this exact endpoint and model accept image_url content. This does not enable Agent tools or verify vision quality."
+	image_support_toggle.toggled.connect(_on_image_support_toggled)
+	content.add_child(image_support_toggle)
 
 	effort_label = _field_label("Reasoning Effort")
 	content.add_child(effort_label)
@@ -268,32 +297,87 @@ func _build_ui() -> void:
 	agent_warning_label.add_theme_color_override("font_color", Color(0.72, 0.64, 0.42))
 	content.add_child(agent_warning_label)
 
+	system_scroll = _build_system_view()
+	root.add_child(system_scroll)
 	about_scroll = _build_about_view()
 	about_scroll.hide()
 	root.add_child(about_scroll)
 	_show_section("provider")
 
 
-func _section_tab(text: String, group: ButtonGroup) -> Button:
+func _section_tab(section_name: String, texture: Texture2D, group: ButtonGroup) -> Button:
 	var button := Button.new()
-	button.text = text
+	button.tooltip_text = section_name
+	button.icon = texture
+	button.expand_icon = true
+	button.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	button.add_theme_constant_override("icon_max_width", UiMetrics.scaled_int(22))
 	button.toggle_mode = true
 	button.button_group = group
 	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	button.custom_minimum_size = Vector2(0, UiMetrics.scaled(34))
+	button.custom_minimum_size = UiMetrics.scaled_vector(Vector2(40, 36))
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = Color(0, 0, 0, 0)
+	normal.set_corner_radius_all(UiMetrics.scaled_int(5))
+	normal.set_content_margin_all(UiMetrics.scaled(8))
+	var hover := normal.duplicate() as StyleBoxFlat
+	hover.bg_color = Color(0.17, 0.175, 0.185)
+	var selected := normal.duplicate() as StyleBoxFlat
+	selected.bg_color = Color(0.235, 0.24, 0.25)
+	var focus := normal.duplicate() as StyleBoxFlat
+	focus.border_color = Color(0.58, 0.6, 0.63, 0.6)
+	focus.set_border_width_all(UiMetrics.scaled_int(1))
+	button.add_theme_stylebox_override("normal", normal)
+	button.add_theme_stylebox_override("hover", hover)
+	button.add_theme_stylebox_override("pressed", selected)
+	button.add_theme_stylebox_override("hover_pressed", selected)
+	button.add_theme_stylebox_override("focus", focus)
+	button.add_theme_color_override("icon_normal_color", Color(0.58, 0.6, 0.63))
+	button.add_theme_color_override("icon_hover_color", Color(0.82, 0.83, 0.85))
+	button.add_theme_color_override("icon_pressed_color", Color(0.94, 0.95, 0.96))
+	button.add_theme_color_override("icon_hover_pressed_color", Color(0.98, 0.98, 0.99))
 	return button
 
 
 func _show_section(section: String) -> void:
-	var show_about := section == "about"
 	if settings_scroll != null:
-		settings_scroll.visible = not show_about
+		settings_scroll.visible = section == "provider"
+	if system_scroll != null:
+		system_scroll.visible = section == "system"
 	if about_scroll != null:
-		about_scroll.visible = show_about
+		about_scroll.visible = section == "about"
 	if provider_tab_button != null:
-		provider_tab_button.set_pressed_no_signal(not show_about)
+		provider_tab_button.set_pressed_no_signal(section == "provider")
+	if system_tab_button != null:
+		system_tab_button.set_pressed_no_signal(section == "system")
 	if about_tab_button != null:
-		about_tab_button.set_pressed_no_signal(show_about)
+		about_tab_button.set_pressed_no_signal(section == "about")
+
+
+func _build_system_view() -> ScrollContainer:
+	var scroll := ScrollContainer.new()
+	scroll.name = "SystemScroll"
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	var content := VBoxContainer.new()
+	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	content.add_theme_constant_override("separation", UiMetrics.scaled_int(10))
+	scroll.add_child(content)
+	content.add_child(_about_heading("GENERAL SETTINGS"))
+	content.add_child(_field_label("Language"))
+	language_selector = OptionButton.new()
+	language_selector.name = "LanguageSelector"
+	language_selector.add_item("English")
+	language_selector.select(0)
+	language_selector.disabled = true
+	language_selector.tooltip_text = "English is the only supported language currently."
+	content.add_child(language_selector)
+	var language_help := Label.new()
+	language_help.text = "More languages will be available in a future update."
+	language_help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	language_help.add_theme_color_override("font_color", Color(0.66, 0.69, 0.74))
+	content.add_child(language_help)
+	return scroll
 
 
 func _build_about_view() -> ScrollContainer:
@@ -343,6 +427,14 @@ func _build_about_view() -> ScrollContainer:
 	content.add_child(overview)
 
 	content.add_child(HSeparator.new())
+	content.add_child(_about_heading("RESOURCES"))
+	content.add_child(_about_link("AboutDocsLink", "Documentation", "Guides and getting started", "https://www.aiorca.dev/docs/"))
+	content.add_child(_about_link("AboutWebsiteLink", "Orca website", "News and product updates", "https://www.aiorca.dev/"))
+	content.add_child(_about_heading("COMMUNITY & DEVELOPMENT"))
+	content.add_child(_about_link("AboutGitHubLink", "GitHub", "Source code and releases", "https://github.com/cold-atom/Orca"))
+	content.add_child(_about_link("AboutIssuesLink", "Report an issue", "Bugs and troubleshooting", "https://github.com/cold-atom/Orca/issues"))
+	content.add_child(_about_link("AboutDiscussionsLink", "Ideas & feature requests", "Discuss improvements with the community", "https://github.com/cold-atom/Orca/discussions"))
+	content.add_child(HSeparator.new())
 	content.add_child(_about_heading("REVIEW-FIRST"))
 	var safety := Label.new()
 	safety.text = "Plan mode is read-only. Work mode requires your approval before model-requested project changes are written."
@@ -385,6 +477,80 @@ func _build_about_view() -> ScrollContainer:
 	license.add_theme_color_override("font_color", Color(0.66, 0.69, 0.74))
 	content.add_child(license)
 	return scroll
+
+
+func _about_link(node_name: String, title: String, description: String, url: String) -> PanelContainer:
+	# The container measures the text and padding. A Button alone does not
+	# include child-control minimum sizes, so a fixed-height row can overflow.
+	var panel := PanelContainer.new()
+	panel.name = node_name + "Row"
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var button := Button.new()
+	button.name = node_name
+	button.tooltip_text = title + "\n" + description + "\n" + url + "\nOpens in your browser"
+	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	button.accessibility_name = title
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = Color(0.12, 0.125, 0.135)
+	normal.set_corner_radius_all(UiMetrics.scaled_int(6))
+	normal.set_content_margin_all(0)
+	panel.add_theme_stylebox_override("panel", normal)
+	var hover := normal.duplicate() as StyleBoxFlat
+	hover.bg_color = Color(0.17, 0.18, 0.195)
+	var focus := StyleBoxFlat.new()
+	focus.bg_color = Color.TRANSPARENT
+	focus.border_color = Color(0.5, 0.6, 0.68)
+	focus.set_border_width_all(UiMetrics.scaled_int(1))
+	focus.set_corner_radius_all(UiMetrics.scaled_int(6))
+	button.add_theme_stylebox_override("normal", StyleBoxEmpty.new())
+	button.add_theme_stylebox_override("hover", hover)
+	button.add_theme_stylebox_override("pressed", hover)
+	button.add_theme_stylebox_override("focus", focus)
+	panel.add_child(button)
+	var margin := MarginContainer.new()
+	margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(margin)
+	margin.add_theme_constant_override("margin_left", UiMetrics.scaled_int(10))
+	margin.add_theme_constant_override("margin_right", UiMetrics.scaled_int(10))
+	margin.add_theme_constant_override("margin_top", UiMetrics.scaled_int(6))
+	margin.add_theme_constant_override("margin_bottom", UiMetrics.scaled_int(6))
+	var row := HBoxContainer.new()
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	margin.add_child(row)
+	var text := VBoxContainer.new()
+	text.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	text.add_theme_constant_override("separation", UiMetrics.scaled_int(2))
+	row.add_child(text)
+	var title_label := Label.new()
+	title_label.text = title
+	title_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	title_label.add_theme_font_size_override("font_size", _body_font_size)
+	title_label.add_theme_color_override("font_color", Color(0.82, 0.87, 0.91))
+	title_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	title_label.clip_text = true
+	text.add_child(title_label)
+	var subtitle := Label.new()
+	subtitle.text = description
+	subtitle.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	subtitle.add_theme_font_size_override("font_size", _meta_font_size)
+	subtitle.add_theme_color_override("font_color", Color(0.58, 0.62, 0.68))
+	subtitle.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	text.add_child(subtitle)
+	var arrow := Label.new()
+	arrow.text = "↗"
+	arrow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	arrow.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	arrow.add_theme_font_size_override("font_size", _body_font_size)
+	arrow.add_theme_color_override("font_color", Color(0.58, 0.62, 0.68))
+	row.add_child(arrow)
+	button.pressed.connect(_on_about_link_pressed.bind(url))
+	return panel
+
+
+func _on_about_link_pressed(url: String) -> void:
+	OS.shell_open(url)
 
 
 func _about_heading(text: String) -> Label:
@@ -434,6 +600,28 @@ func _focus_model_configuration() -> void:
 	var target: Control = model_search if bool(definition.get("model_discovery", _current_provider != "custom")) else custom_model_input
 	target.grab_focus()
 	settings_scroll.ensure_control_visible(target)
+
+
+func _on_image_support_toggled(enabled: bool) -> void:
+	_save_current_profile()
+	var config := Config.get_provider_config(_current_provider)
+	Config.set_image_input_override(_current_provider, ImageCapability.binding(config), enabled)
+	_sync_image_support()
+
+
+func _sync_image_support() -> void:
+	if image_support_toggle == null or _current_provider.is_empty():
+		return
+	var config := Config.get_provider_config(_current_provider)
+	config["model"] = _selected_model
+	if custom_url_input.visible:
+		config["base_url"] = custom_url_input.text.strip_edges()
+	config["api_key"] = api_key_input.text.strip_edges()
+	var record = config.get("image_input_override", {})
+	var enabled: bool = typeof(record) == TYPE_DICTIONARY and record.get("binding") == ImageCapability.binding(config) and record.get("enabled") == true
+	image_support_toggle.set_pressed_no_signal(enabled)
+	config.erase("image_input_override")
+	image_support_toggle.visible = ImageCapability.resolve(config) == "unknown" or enabled
 
 
 func _populate_providers() -> void:
@@ -499,6 +687,7 @@ func _load_provider(provider_id: String) -> void:
 		_refresh_models()
 	_loading_provider = false
 	_sync_agent_compatibility()
+	_sync_image_support()
 
 
 func _on_api_key_changed(_text: String) -> void:
@@ -532,6 +721,7 @@ func _on_custom_url_changed(_text: String) -> void:
 		refresh_button.disabled = false
 		metadata_label.text = ""
 		status_label.text = "Endpoint changed. Select Refresh to contact it."
+	_sync_image_support()
 
 
 func _on_manual_model_changed(text: String) -> void:
@@ -544,6 +734,7 @@ func _on_manual_model_changed(text: String) -> void:
 		status_label.text = "Using a manual Model ID. Select Refresh to restore discovered models."
 		_cancel_agent_probe_for_change()
 		_sync_agent_compatibility()
+		_sync_image_support()
 
 
 func _refresh_models() -> void:
@@ -748,6 +939,7 @@ func _save_current_profile() -> void:
 		_selected_effort,
 		custom_url_input.text.strip_edges()
 	)
+	_sync_image_support()
 
 
 func _update_endpoint_status() -> void:

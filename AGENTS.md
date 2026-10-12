@@ -38,6 +38,11 @@ Update `DEVELOPMENT.md` whenever a change alters architecture, tool behavior, sa
 | `addons/orca/scripts/agent_compatibility_probe.gd` | Isolated project-free two-step function-call probe and exact provider/origin/model/version compatibility binding. |
 | `addons/orca/scripts/agent_controller.gd` | Message history, Plan/Work permissions, request-scoped context, tool loop, approval suspension, and cancellation. |
 | `addons/orca/scripts/context_budget.gd` | Conservative request estimation, response/tool reserves, and protocol-aware complete-turn compaction. |
+| `addons/orca/scripts/image_attachments.gd` | Bounded still-image preparation, normalized image records, multimodal materialization, and conservative image reserves. |
+| `addons/orca/scripts/image_capability.gd` | Exact-profile image-input capability and explicit unknown-profile configuration. |
+| `addons/orca/scripts/image_attachment_tray.gd` | Composer and message thumbnail trays with removal and preview actions. |
+| `addons/orca/scripts/image_attachment_window.gd` | Separate native image drop/Browse window that isolates desktop attachment intake from editor import. |
+| `addons/orca/scripts/composer_input.gd` | Public TextEdit paste interception for explicit image clipboard intake and normal text fallback. |
 | `addons/orca/scripts/project_instructions.gd` | Bounded automatic loading of root `res://AGENTS.md` into private request-scoped context. |
 | `addons/orca/scripts/project_skills.gd` | Bounded `res://skills/<slug>/SKILL.md` metadata discovery and explicit skill-body loading. |
 | `addons/orca/scripts/godot_api_inspector.gd` | Read-only `ClassDB` API signatures, hierarchy, constants, enums, and safe editor Help topics. |

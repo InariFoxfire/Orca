@@ -10,7 +10,6 @@ Inspect your project, understand editor context, propose Godot-aware changes, an
 
 <p>
   <a href="https://github.com/cold-atom/Orca/releases/latest"><img src="https://img.shields.io/github/v/release/cold-atom/Orca?style=for-the-badge&label=Latest&color=111111&labelColor=000000" alt="Latest release"></a>
-  <a href="https://github.com/cold-atom/Orca/releases"><img src="https://img.shields.io/github/downloads/cold-atom/Orca/total?style=for-the-badge&color=111111&labelColor=000000" alt="Release downloads"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/Open%20Source-MIT-111111?style=for-the-badge&labelColor=000000" alt="Open source under the MIT License"></a>
   <img src="https://img.shields.io/badge/Godot-4.7.2-111111?style=for-the-badge&labelColor=000000" alt="Godot 4.7.2">
 </p>

@@ -1,16 +1,20 @@
 @tool
 extends Node
+const ScriptReferences = preload("res://addons/orca/scripts/script_references.gd")
 const ImageAttachments = preload("res://addons/orca/scripts/image_attachments.gd")
 const ImageCapability = preload("res://addons/orca/scripts/image_capability.gd")
 
 const ProviderRegistry = preload("res://addons/orca/scripts/provider_registry.gd")
 const EndpointPolicy = preload("res://addons/orca/scripts/endpoint_policy.gd")
+const ResponsesProtocol = preload("res://addons/orca/scripts/responses_protocol.gd")
+const DeepSeekCompatibility = preload("res://addons/orca/scripts/deepseek_response_compatibility.gd")
 
 signal request_completed(request_id: int, response: Dictionary)
 signal request_failed(request_id: int, error: Dictionary)
 signal request_cancelled(request_id: int)
 signal stream_started(request_id: int)
 signal stream_delta(request_id: int, content: String)
+signal cloud_metadata_received(request_id: int, metadata: Dictionary)
 
 const CONNECT_TIMEOUT_MS := 30000
 const INACTIVITY_TIMEOUT_MS := 60000
@@ -18,6 +22,7 @@ const INACTIVITY_TIMEOUT_MS := 60000
 const RESPONSE_GENERATION_TIMEOUT_MS := 10 * 60 * 1000
 const INTERNAL_GENERATION_TIMEOUT_OVERRIDE_OPTION := "_orca_internal_generation_timeout_ms"
 const LIFECYCLE_REQUEST_ID_OPTION := "lifecycle_request_id"
+const INCLUDE_HISTORY_IMAGES_OPTION := "_orca_include_history_images"
 const GENERATION_TIMEOUT_MESSAGE := "The response exceeded the total generation deadline."
 const MAX_RESPONSE_BYTES := 16 * 1024 * 1024
 const MAX_SSE_LINE_BYTES := 1024 * 1024
@@ -71,6 +76,16 @@ var _response_code := 0
 var _generation_deadline_ms := 0
 var _response_generation_timeout_ms := RESPONSE_GENERATION_TIMEOUT_MS
 var _partial_response_detected := false
+var _configured_api_mode := "chat_completions"
+var _request_config_snapshot: Dictionary = {}
+var _responses_reply: Dictionary = {}
+var _responses_arguments: Dictionary = {}
+var _deepseek_prefix_filter
+var account_service
+var _cloud_metadata: Dictionary = {}
+var _cloud_error: Dictionary = {}
+var _cloud_event_error := false
+var _cloud_tool_names: Array[String] = []
 
 
 func _ready() -> void:
@@ -100,7 +115,11 @@ func send_chat_completion(messages: Array, tools: Array = [], provider_config: D
 		return
 	request_config = authorization.get("config", request_config)
 	var provider = ProviderRegistry.get_provider(provider_id)
+	_configured_api_mode = provider.api_mode(request_config)
 	var api_key = str(request_config.get("api_key", "")).strip_edges()
+	if provider_id == "orca_cloud" and (api_key.length() > 8192 or api_key.contains("\r") or api_key.contains("\n") or api_key.contains(" ")):
+		request_failed.emit(lifecycle_request_id, _make_error("Invalid Orca account credentials.", "configuration", false))
+		return
 	if api_key.is_empty() and not bool(provider.definition().get("auth_optional", false)):
 		request_failed.emit(lifecycle_request_id, _make_error("API Key is missing. Please set it in Settings.", "configuration", false))
 		return
@@ -120,7 +139,12 @@ func send_chat_completion(messages: Array, tools: Array = [], provider_config: D
 		request_failed.emit(lifecycle_request_id, _make_error("Invalid API URL. Use a complete http:// or https:// URL.", "configuration", false))
 		return
 
+	var reference_error := ScriptReferences.validate_messages(messages)
+	if not reference_error.is_empty():
+		request_failed.emit(lifecycle_request_id, _make_error(reference_error, "configuration", false))
+		return
 	var has_images := false
+	var validated_images := {}
 	for message in messages:
 		if typeof(message) != TYPE_DICTIONARY:
 			continue
@@ -128,28 +152,67 @@ func send_chat_completion(messages: Array, tools: Array = [], provider_config: D
 			request_failed.emit(lifecycle_request_id, _make_error("Invalid image attachments.", "configuration", false))
 			return
 		var images: Array = message.get("images", [])
-		var image_error := ImageAttachments.validate_images(images)
-		if not image_error.is_empty() or (not images.is_empty() and message.get("role") != "user"):
+		if images.size() > ImageAttachments.MAX_IMAGES or (not images.is_empty() and (message.get("role") != "user" or typeof(message.get("content")) != TYPE_STRING)):
 			request_failed.emit(lifecycle_request_id, _make_error("Invalid image attachments.", "configuration", false))
 			return
+		for image in images:
+			var image_id: String = image.get("id", "") if typeof(image) == TYPE_DICTIONARY and typeof(image.get("id")) == TYPE_STRING else ""
+			if image_id.length() != 64:
+				request_failed.emit(lifecycle_request_id, _make_error("Invalid image attachments.", "configuration", false))
+				return
+			var cached: Dictionary = validated_images.get(image_id, {})
+			# Validate identical pixel records once per request. Name/resized are
+			# display-only; modified data/dimensions still require full validation.
+			if not cached.is_empty() and typeof(image.get("data")) == TYPE_STRING and typeof(image.get("width")) in [TYPE_INT, TYPE_FLOAT] and typeof(image.get("height")) in [TYPE_INT, TYPE_FLOAT] and image["data"] == cached["data"] and image["width"] == cached["width"] and image["height"] == cached["height"]:
+				continue
+			if cached.is_empty() and validated_images.size() >= ImageAttachments.MAX_SESSION_IMAGES:
+				request_failed.emit(lifecycle_request_id, _make_error("Image history exceeds the 32 unique-image request limit.", "configuration", false))
+				return
+			if not ImageAttachments.valid_record(image):
+				request_failed.emit(lifecycle_request_id, _make_error("Invalid image attachments.", "configuration", false))
+				return
+			validated_images[image_id] = {"data": image["data"], "width": image["width"], "height": image["height"]}
 		has_images = has_images or not images.is_empty()
-	if has_images and ImageCapability.resolve(request_config) != "supported":
-		request_failed.emit(lifecycle_request_id, _make_error("The selected model/endpoint does not have confirmed image input support.", "configuration", false))
-		return
-	var body = {
-		"model": request_config.get("model", ""),
-		"messages": provider.sanitize_messages(ImageAttachments.request_messages(messages)),
-		"stream": true,
-		"stream_options": {"include_usage": true}
-	}
-	if not tools.is_empty():
-		body["tools"] = tools
-		body["tool_choice"] = "auto"
-	provider.apply_chat_options(body, str(request_config.get("reasoning_effort", "default")))
+	var image_capability := ImageCapability.resolve(request_config) if has_images else "supported"
+	var include_history_images := image_capability == "supported"
+	if request_options.has(INCLUDE_HISTORY_IMAGES_OPTION):
+		if typeof(request_options[INCLUDE_HISTORY_IMAGES_OPTION]) != TYPE_BOOL:
+			request_failed.emit(lifecycle_request_id, _make_error("Invalid request image policy.", "configuration", false))
+			return
+		include_history_images = request_options[INCLUDE_HISTORY_IMAGES_OPTION]
+	if has_images:
+		var current_user := ImageAttachments.latest_user_index(messages)
+		var current_has_images: bool = current_user >= 0 and not messages[current_user].get("images", []).is_empty()
+		if include_history_images and image_capability != "supported":
+			request_failed.emit(lifecycle_request_id, _make_error("Image input support changed or is unconfirmed for this request. Choose a vision-capable model or continue in a new text-only turn.", "configuration", false))
+			return
+		if not include_history_images and current_has_images:
+			request_failed.emit(lifecycle_request_id, _make_error("This request cannot send new image attachments. Remove the draft images or start a turn with a vision-capable model.", "configuration", false))
+			return
+	var projected := ImageAttachments.request_messages(ScriptReferences.request_messages(messages), include_history_images)
+	var body: Dictionary
+	if _configured_api_mode == "responses":
+		var converted := ResponsesProtocol.request_body(projected, tools, request_config)
+		if not converted.get("success", false):
+			request_failed.emit(lifecycle_request_id, _make_error(str(converted.get("error", "Invalid Responses request.")), "configuration", false))
+			return
+		body = converted["body"]
+	else:
+		body = {"model": request_config.get("model", ""), "messages": provider.prepare_messages(projected, request_config), "stream": true, "stream_options": {"include_usage": true}}
+		if not tools.is_empty():
+			body["tools"] = tools
+			body["tool_choice"] = "auto"
+		provider.apply_chat_options(body, str(request_config.get("reasoning_effort", "default")))
+		if provider_id == "orca_cloud":
+			body["max_tokens"] = clampi(int(request_config.get("hosted_output_tokens", 8192)), 1, 8192)
+		for message in body["messages"]:
+			if typeof(message) == TYPE_DICTIONARY:
+				message.erase(ResponsesProtocol.PRIVATE_FIELD)
 	if JSON.stringify(body).to_utf8_buffer().size() > ImageAttachments.MAX_REQUEST_BYTES:
 		request_failed.emit(lifecycle_request_id, _make_error("The request exceeds the 16 MiB request limit. Start a new conversation or reduce attachments.", "configuration", false))
 		return
 
+	_request_config_snapshot = request_config.duplicate(true)
 	_reset_stream_state()
 	_generation_deadline_ms = 0
 	_response_generation_timeout_ms = RESPONSE_GENERATION_TIMEOUT_MS
@@ -164,13 +227,35 @@ func send_chat_completion(messages: Array, tools: Array = [], provider_config: D
 	_lifecycle_request_id = lifecycle_request_id
 	_request_serial += 1
 	_generation_deadline_ms = Time.get_ticks_msec() + _response_generation_timeout_ms
-	_perform_request(_request_serial, endpoint, provider.request_headers(api_key), body, bool(request_options.get("allow_stream_options_retry", true)), MAX_CONNECT_RETRIES)
+	var headers: PackedStringArray = provider.request_headers(api_key)
+	if provider_id == "orca_cloud":
+		headers.append("X-Orca-Contract-Version: 1")
+		headers.append("X-Orca-Tool-Contract: orca-tools-v1")
+		headers.append("Idempotency-Key: " + Crypto.new().generate_random_bytes(16).hex_encode())
+		var binding := str(request_config.get("hosted_turn_binding", ""))
+		if not binding.is_empty():
+			if not _cloud_uuid(binding):
+				_fail_request(_request_serial, "Invalid hosted turn binding.", "configuration", false)
+				return
+			headers.append("X-Orca-Turn-Binding: " + binding)
+		for field in ["capability_version", "continuation_style"]:
+			var value := str(request_config.get(field, ""))
+			if value.length() > 64 or value.contains("\n") or value.contains("\r"):
+				_fail_request(_request_serial, "Invalid hosted profile metadata.", "configuration", false)
+				return
+			if not value.is_empty():
+				headers.append(("X-Orca-Capability-Version: " if field == "capability_version" else "X-Orca-Continuation-Style: ") + value)
+		for tool in tools:
+			if typeof(tool) == TYPE_DICTIONARY and typeof(tool.get("function")) == TYPE_DICTIONARY:
+				_cloud_tool_names.append(str(tool["function"].get("name", "")))
+	_perform_request(_request_serial, endpoint, headers, body, provider_id != "orca_cloud" and bool(request_options.get("allow_stream_options_retry", true)), MAX_CONNECT_RETRIES)
 
 
 func cancel_request() -> void:
 	if not _is_requesting:
 		return
 	var lifecycle_request_id := _lifecycle_request_id
+	_cancel_cloud_operation()
 	_cancel_requested = true
 	_request_serial += 1
 	_is_requesting = false
@@ -178,12 +263,16 @@ func cancel_request() -> void:
 		_http_client.close()
 		_http_client = null
 	_reset_stream_state()
+	_request_config_snapshot.clear()
 	_generation_deadline_ms = 0
 	_response_generation_timeout_ms = RESPONSE_GENERATION_TIMEOUT_MS
 	request_cancelled.emit(lifecycle_request_id)
 
 
 func _perform_request(request_id: int, endpoint: Dictionary, base_headers: PackedStringArray, body: Dictionary, allow_usage_retry: bool, connect_retries_remaining: int) -> void:
+	if _configured_provider == "orca_cloud" and _cloud_tool_names.is_empty():
+		for tool in body.get("tools", []):
+			_cloud_tool_names.append(str(tool.get("function", {}).get("name", "")))
 	if _fail_if_generation_timed_out(request_id):
 		return
 	_http_client = HTTPClient.new()
@@ -253,6 +342,23 @@ func _perform_request(request_id: int, endpoint: Dictionary, base_headers: Packe
 	var response_code := _http_client.get_response_code()
 	_response_code = response_code
 	var response_headers := _http_client.get_response_headers_as_dictionary()
+	if _configured_provider == "orca_cloud":
+		var receipt := _get_header(response_headers, "x-orca-request-id")
+		var binding := _get_header(response_headers, "x-orca-turn-binding")
+		if _cloud_uuid(receipt):
+			_cloud_metadata["request_id"] = receipt
+		if _cloud_uuid(binding):
+			_cloud_metadata["turn_binding"] = binding
+		_cloud_metadata["retry_after"] = clampi(int(_get_header(response_headers, "retry-after")), 0, 3600)
+		if response_code == HTTPClient.RESPONSE_OK and (not _cloud_uuid(receipt) or not _cloud_uuid(binding)):
+			_fail_request(request_id, "Orca Cloud returned invalid request ownership metadata.", "malformed_response", false)
+			return
+		if response_code == HTTPClient.RESPONSE_OK and (_get_header(response_headers, "x-orca-capability-version") != str(_request_config_snapshot.get("capability_version", "")) or _get_header(response_headers, "x-orca-continuation-style") != str(_request_config_snapshot.get("continuation_style", "standard"))):
+			_fail_request(request_id, "The hosted model capability changed. Refresh Models and retest compatibility.", "malformed_response", false)
+			return
+		cloud_metadata_received.emit(_lifecycle_request_id, _cloud_metadata.duplicate(true))
+		if not _is_current_request(request_id):
+			return
 	var content_type := _get_header(response_headers, "content-type").to_lower()
 	var media_type := content_type.split(";", false, 1)[0].strip_edges()
 	var is_sse := media_type == "text/event-stream"
@@ -260,6 +366,8 @@ func _perform_request(request_id: int, endpoint: Dictionary, base_headers: Packe
 	if response_code == HTTPClient.RESPONSE_OK:
 		if is_sse:
 			stream_started.emit(_lifecycle_request_id)
+			if not _is_current_request(request_id):
+				return
 
 	_request_phase = "receiving_response"
 	var last_activity := Time.get_ticks_msec()
@@ -319,6 +427,11 @@ func _perform_request(request_id: int, endpoint: Dictionary, base_headers: Packe
 		return
 	if response_code != HTTPClient.RESPONSE_OK:
 		var error_body := _raw_response.get_string_from_utf8().strip_edges()
+		if _configured_provider == "orca_cloud":
+			var cloud = JSON.parse_string(error_body)
+			_cloud_error = _normalized_cloud_error(cloud.get("error", {}) if typeof(cloud) == TYPE_DICTIONARY else {})
+			_fail_request(request_id, str(_cloud_error["message"]), "http", false)
+			return
 		if allow_usage_retry and response_code in [400, 422] and error_body.to_lower().contains("stream_options"):
 			_http_client.close()
 			_http_client = null
@@ -331,12 +444,18 @@ func _perform_request(request_id: int, endpoint: Dictionary, base_headers: Packe
 		return
 
 	if is_json:
+		if _configured_provider == "orca_cloud":
+			_fail_request(request_id, "Orca Cloud must return a completed SSE stream.", "malformed_response", false)
+			return
 		_complete_json_response(request_id)
 		return
 	if not is_sse:
 		_fail_request(request_id, "The API returned an unexpected Content-Type: %s." % (media_type if not media_type.is_empty() else "missing"), "malformed_response", false)
 		return
 
+	if _configured_provider == "orca_cloud" and (not _line_buffer.is_empty() or not _event_data_lines.is_empty()):
+		_fail_request(request_id, "The hosted stream ended with an incomplete event.", "connection", false)
+		return
 	_finish_sse_input()
 	if _stream_done:
 		if _stream_error.is_empty():
@@ -344,7 +463,7 @@ func _perform_request(request_id: int, endpoint: Dictionary, base_headers: Packe
 		else:
 			_fail_request(request_id, _stream_error, _stream_error_category(), false)
 		return
-	if _received_sse_event and _finish_reason != null:
+	if _configured_provider != "orca_cloud" and _received_sse_event and _finish_reason != null:
 		_complete_stream(request_id)
 		return
 
@@ -352,17 +471,26 @@ func _perform_request(request_id: int, endpoint: Dictionary, base_headers: Packe
 
 
 func _consume_sse_bytes(bytes: PackedByteArray) -> void:
+	var generation := _request_serial
 	for byte in bytes:
 		if _skip_next_lf:
 			_skip_next_lf = false
 			if byte == 10:
 				continue
 		if byte == 13:
+			if not _valid_cloud_utf8_line():
+				return
 			_process_sse_line(_line_buffer.get_string_from_utf8())
+			if generation != _request_serial:
+				return
 			_line_buffer.clear()
 			_skip_next_lf = true
 		elif byte == 10:
+			if not _valid_cloud_utf8_line():
+				return
 			_process_sse_line(_line_buffer.get_string_from_utf8())
+			if generation != _request_serial:
+				return
 			_line_buffer.clear()
 		else:
 			_line_buffer.append(byte)
@@ -397,6 +525,8 @@ func _process_sse_line(line: String) -> void:
 			_stream_done = true
 			return
 		_event_data_lines.append(value)
+	elif field == "event" and value == "error":
+		_cloud_event_error = true
 
 
 func _dispatch_sse_event() -> void:
@@ -407,6 +537,8 @@ func _dispatch_sse_event() -> void:
 	_event_data_bytes = 0
 	_received_sse_event = true
 	if payload.strip_edges() == "[DONE]":
+		if _configured_provider == "orca_cloud" and (payload != "[DONE]" or _finish_reason == null or _cloud_event_error):
+			_stream_error = "Orca Cloud ended without a valid successful completion."
 		_stream_done = true
 		return
 
@@ -417,9 +549,24 @@ func _dispatch_sse_event() -> void:
 		return
 	var data = json.get_data()
 	if typeof(data) != TYPE_DICTIONARY:
+		if _configured_provider == "orca_cloud":
+			_stream_error = "Invalid hosted stream event."
+			_stream_done = true
+		return
+	if _configured_provider == "orca_cloud" and (_cloud_event_error or data.has("error")):
+		_cloud_error = _normalized_cloud_error(data.get("error", {}))
+		_stream_error = str(_cloud_error["message"])
+		_stream_done = true
+		return
+	if _configured_api_mode == "responses":
+		_consume_responses_event(data)
 		return
 	if data.has("model"):
 		_request_model = str(data["model"])
+		if _configured_provider == "orca_cloud" and _request_model != _configured_request_model:
+			_stream_error = "The hosted stream returned a different model profile."
+			_stream_done = true
+			return
 		var model_error := _local_model_mismatch_error(_request_model)
 		if not model_error.is_empty():
 			_stream_error = model_error
@@ -439,12 +586,30 @@ func _dispatch_sse_event() -> void:
 		return
 
 	var choices = data.get("choices", [])
+	if _configured_provider == "orca_cloud" and (typeof(choices) != TYPE_ARRAY or choices.size() > 1 or (choices.is_empty() and not data.has("usage"))):
+		_stream_error = "Invalid hosted completion choices."
+		_stream_done = true
+		return
 	if typeof(choices) != TYPE_ARRAY or choices.is_empty():
 		return
 	var choice = choices[0]
+	if _configured_provider == "orca_cloud" and (typeof(choice) != TYPE_DICTIONARY or choice.get("index") != 0 or typeof(choice.get("delta")) != TYPE_DICTIONARY or (_finish_reason != null and (not choice.get("delta", {}).is_empty() or choice.get("finish_reason") != null))):
+		_stream_error = "Invalid hosted completion ordering."
+		_stream_done = true
+		return
 	if typeof(choice) != TYPE_DICTIONARY:
 		return
 	var delta = choice.get("delta", {})
+	if _configured_provider == "orca_cloud":
+		if delta.has("reasoning") or delta.has("reasoning_details") or (typeof(delta.get("reasoning_content")) == TYPE_STRING and not delta["reasoning_content"].is_empty() and _request_config_snapshot.get("continuation_style", "standard") != "reasoning_content"):
+			_stream_error = "The hosted profile returned unsupported private continuation."
+			_stream_done = true
+			return
+		for field in ["content", "reasoning_content"]:
+			if delta.get(field) != null and typeof(delta[field]) != TYPE_STRING:
+				_stream_error = "Invalid hosted content delta."
+				_stream_done = true
+				return
 	if typeof(delta) != TYPE_DICTIONARY:
 		return
 
@@ -456,7 +621,10 @@ func _dispatch_sse_event() -> void:
 			_stream_done = true
 			return
 		_assistant_content += content
-		stream_delta.emit(_lifecycle_request_id, content)
+		var generation := _request_serial
+		_emit_visible_delta(content)
+		if generation != _request_serial:
+			return
 	var reasoning_content = delta.get("reasoning_content", delta.get("reasoning", null))
 	if typeof(reasoning_content) == TYPE_STRING and not reasoning_content.is_empty():
 		_reasoning_content_bytes += reasoning_content.to_utf8_buffer().size()
@@ -476,6 +644,103 @@ func _dispatch_sse_event() -> void:
 
 	if choice.get("finish_reason") != null:
 		_finish_reason = choice.get("finish_reason")
+
+
+func _consume_responses_event(data: Dictionary) -> void:
+	var event_type := str(data.get("type", ""))
+	if event_type in ["error", "response.failed", "response.incomplete"]:
+		var error = data.get("error", data.get("response", {}).get("error", {}) if typeof(data.get("response")) == TYPE_DICTIONARY else {})
+		_stream_error = _sanitize_provider_error(str(error.get("message", "Responses did not complete successfully."))) if typeof(error) == TYPE_DICTIONARY else "Responses did not complete successfully."
+		_stream_done = true
+		return
+	if event_type.ends_with(".delta"):
+		var delta = data.get("delta")
+		if typeof(delta) != TYPE_STRING:
+			_stream_error = "Responses returned an invalid streaming delta."
+			_stream_done = true
+			return
+		if event_type == "response.output_text.delta":
+			_assistant_content_bytes += delta.to_utf8_buffer().size()
+			if _assistant_content_bytes > MAX_ASSISTANT_CONTENT_BYTES:
+				_stream_error = "Assistant text exceeded the 2 MiB safety limit."
+				_stream_done = true
+				return
+			_assistant_content += delta
+			_emit_visible_delta(delta)
+		elif event_type == "response.function_call_arguments.delta":
+			var index = data.get("output_index")
+			if typeof(index) not in [TYPE_INT, TYPE_FLOAT] or not is_finite(float(index)) or float(index) != floor(float(index)) or index < 0 or index >= ResponsesProtocol.MAX_ITEMS:
+				_stream_error = "Responses returned an invalid function output index."
+				_stream_done = true
+				return
+			_tool_argument_bytes += delta.to_utf8_buffer().size()
+			if _tool_argument_bytes > MAX_TOOL_ARGUMENT_BYTES:
+				_stream_error = "Tool-call arguments exceeded the 2 MiB safety limit."
+				_stream_done = true
+				return
+			_responses_arguments[int(index)] = str(_responses_arguments.get(int(index), "")) + delta
+		elif event_type.begins_with("response.reasoning"):
+			_reasoning_content_bytes += delta.to_utf8_buffer().size()
+			if _reasoning_content_bytes > MAX_REASONING_CONTENT_BYTES:
+				_stream_error = "Provider reasoning exceeded the 2 MiB safety limit."
+				_stream_done = true
+		return
+	if event_type == "response.output_item.added":
+		_partial_response_detected = true
+	if event_type != "response.completed":
+		return
+	var raw_response = data.get("response")
+	if typeof(raw_response) != TYPE_DICTIONARY:
+		_stream_error = "Responses returned an invalid completion event."
+		_stream_done = true
+		return
+	var converted := ResponsesProtocol.completion(raw_response, _request_config_snapshot)
+	if not converted.get("success", false):
+		_stream_error = str(converted.get("error", "Invalid Responses completion."))
+		_stream_done = true
+		return
+	var response: Dictionary = converted["response"]
+	var final_text: String = str(converted.get("raw_content", response["choices"][0]["message"]["content"]))
+	if not _assistant_content.is_empty() and _assistant_content != final_text:
+		_stream_error = "Responses completion text did not match its streamed text."
+		_stream_done = true
+		return
+	for index in _responses_arguments:
+		var output: Array = raw_response["output"]
+		if index >= output.size() or output[index].get("type") != "function_call" or output[index].get("arguments") != _responses_arguments[index]:
+			_stream_error = "Responses completion arguments did not match their streamed arguments."
+			_stream_done = true
+			return
+	var generation := _request_serial
+	_flush_visible_prefix()
+	if generation != _request_serial:
+		return
+	response["usage"] = _normalize_usage(response.get("usage", {}))
+	_responses_reply = response
+	_stream_done = true
+
+
+func _emit_visible_delta(content: String) -> void:
+	var visible := content
+	if DeepSeekCompatibility.enabled(_request_config_snapshot):
+		if _deepseek_prefix_filter == null:
+			_deepseek_prefix_filter = DeepSeekCompatibility.new()
+		visible = _deepseek_prefix_filter.push(content)
+	if not visible.is_empty():
+		stream_delta.emit(_lifecycle_request_id, visible)
+
+
+func _flush_visible_prefix() -> void:
+	if _deepseek_prefix_filter != null:
+		var visible: String = _deepseek_prefix_filter.finish()
+		if not visible.is_empty():
+			stream_delta.emit(_lifecycle_request_id, visible)
+
+
+func _add_request_identity(response: Dictionary) -> void:
+	response["requested_model"] = _configured_request_model
+	response["requested_api_url"] = _configured_api_url
+	response["requested_provider"] = _configured_provider
 
 
 func _accumulate_tool_call(delta) -> void:
@@ -570,8 +835,11 @@ func _reasoning_detail_index(detail: Dictionary) -> int:
 
 
 func _finish_sse_input() -> void:
+	var generation := _request_serial
 	if not _line_buffer.is_empty():
 		_process_sse_line(_line_buffer.get_string_from_utf8())
+		if generation != _request_serial:
+			return
 		_line_buffer.clear()
 	if not _event_data_lines.is_empty() and not _stream_done:
 		_dispatch_sse_event()
@@ -582,14 +850,31 @@ func _complete_stream(request_id: int) -> void:
 		return
 	if _fail_if_generation_timed_out(request_id):
 		return
+	if _configured_api_mode == "responses":
+		if _responses_reply.is_empty():
+			_fail_request(request_id, "Responses stream ended without a completed response.", "malformed_response", false)
+			return
+		var response := _responses_reply.duplicate(true)
+		_add_request_identity(response)
+		if _finish_request(request_id):
+			request_completed.emit(_lifecycle_request_id, response)
+		return
 	var completed_tool_calls := _stream_tool_calls()
-	var completion_error := _validate_completion(_assistant_content, completed_tool_calls, _finish_reason)
+	var visible_content := DeepSeekCompatibility.normalize(_assistant_content) if DeepSeekCompatibility.enabled(_request_config_snapshot) else _assistant_content
+	var completion_error := _validate_completion(visible_content, completed_tool_calls, _finish_reason)
+	if _configured_provider == "orca_cloud":
+		for call in completed_tool_calls:
+			if str(call.get("function", {}).get("name", "")) not in _cloud_tool_names or typeof(JSON.parse_string(str(call.get("function", {}).get("arguments", "")))) != TYPE_DICTIONARY:
+				completion_error = "The hosted response returned an unoffered or invalid tool call."
 	if not completion_error.is_empty():
 		_fail_request(request_id, completion_error, "malformed_response", false)
 		return
+	_flush_visible_prefix()
+	if not _is_current_request(request_id):
+		return
 	var assistant_message := {
 		"role": "assistant",
-		"content": _assistant_content
+		"content": visible_content
 	}
 	if not _tool_calls.is_empty():
 		assistant_message["tool_calls"] = completed_tool_calls
@@ -610,6 +895,8 @@ func _complete_stream(request_id: int) -> void:
 	}
 	if not _stream_usage.is_empty():
 		response["usage"] = _stream_usage.duplicate(true)
+	if _configured_provider == "orca_cloud":
+		response["_orca_cloud"] = _cloud_metadata.duplicate(true)
 	var model_error := _local_model_mismatch_error(_request_model)
 	if not model_error.is_empty():
 		_fail_request(request_id, model_error, "model_mismatch", false)
@@ -631,11 +918,31 @@ func _complete_json_response(request_id: int) -> void:
 	if typeof(data) != TYPE_DICTIONARY:
 		_fail_request(request_id, "Invalid API response format.", "malformed_response", false)
 		return
-	_partial_response_detected = _json_has_partial_response(data)
+	if _configured_api_mode == "responses":
+		_partial_response_detected = typeof(data.get("output")) == TYPE_ARRAY and not data["output"].is_empty()
+		var converted := ResponsesProtocol.completion(data, _request_config_snapshot)
+		if not converted.get("success", false):
+			_fail_request(request_id, str(converted.get("error", "Invalid Responses response.")), "malformed_response", false)
+			return
+		data = converted["response"]
+		data["usage"] = _normalize_usage(data.get("usage", {}))
+	elif DeepSeekCompatibility.enabled(_request_config_snapshot):
+		var choices = data.get("choices", [])
+		if typeof(choices) == TYPE_ARRAY and not choices.is_empty() and typeof(choices[0]) == TYPE_DICTIONARY:
+			var message = choices[0].get("message")
+			if typeof(message) == TYPE_DICTIONARY and typeof(message.get("content")) == TYPE_STRING:
+				_partial_response_detected = _json_has_partial_response(data)
+				if message["content"].to_utf8_buffer().size() > MAX_ASSISTANT_CONTENT_BYTES:
+					_fail_request(request_id, "Assistant text exceeded the 2 MiB safety limit.", "response_limit", false)
+					return
+				message["content"] = DeepSeekCompatibility.normalize(message["content"])
+	_partial_response_detected = _partial_response_detected or _json_has_partial_response(data)
 	var response_error := _validate_json_response(data)
 	if not response_error.is_empty():
 		_fail_request(request_id, response_error, "malformed_response", false)
 		return
+	if _configured_api_mode != "responses":
+		data["choices"][0]["message"].erase(ResponsesProtocol.PRIVATE_FIELD)
 	data["requested_model"] = _configured_request_model
 	data["requested_api_url"] = _configured_api_url
 	data["requested_provider"] = _configured_provider
@@ -658,6 +965,7 @@ func _finish_request(request_id: int) -> bool:
 	_generation_deadline_ms = 0
 	_response_generation_timeout_ms = RESPONSE_GENERATION_TIMEOUT_MS
 	_partial_response_detected = false
+	_request_config_snapshot.clear()
 	return true
 
 
@@ -665,6 +973,12 @@ func _fail_request(request_id: int, message: String, category: String, retryable
 	if not _is_current_request(request_id):
 		return
 	var error := _make_error(message, category, retryable)
+	if _configured_provider == "orca_cloud":
+		error.merge(_cloud_error, true)
+		error["cloud_receipt"] = _cloud_metadata.duplicate(true)
+		if _response_code == 401 and account_service != null:
+			account_service.call_deferred("invalidate_access", str(_request_config_snapshot.get("hosted_identity", "")))
+		_cancel_cloud_operation()
 	if _finish_request(request_id):
 		request_failed.emit(_lifecycle_request_id, error)
 
@@ -695,7 +1009,57 @@ func _is_current_request(request_id: int) -> bool:
 	return _is_requesting and not _cancel_requested and request_id == _request_serial
 
 
+func _valid_cloud_utf8_line() -> bool:
+	if _configured_provider != "orca_cloud" or _line_buffer.get_string_from_utf8().to_utf8_buffer() == _line_buffer:
+		return true
+	_stream_error = "The hosted stream contained invalid UTF-8."
+	_stream_done = true
+	return false
+
+
+static func _cloud_uuid(value: String) -> bool:
+	return value.length() == 36 and value.count("-") == 4 and value.replace("-", "").length() == 32 and value.replace("-", "").is_valid_hex_number(false)
+
+
+func _normalized_cloud_error(raw) -> Dictionary:
+	var messages := {
+		"insufficient_credits": "Your Orca allowance cannot cover this request. Open Account → Orca Console to manage usage; completed work has been preserved.",
+		"model_access_required": "This model requires an eligible Orca subscription. Choose an included model or open Orca Console.",
+		"invalid_credentials": "Your Orca connection expired or was revoked. Reconnect in Account.",
+		"account_suspended": "Your Orca account cannot currently make requests. Open Orca Console.",
+		"upstream_malformed": "The hosted provider returned an incomplete or invalid response. No partial tools were executed.",
+		"request_cancelled": "The hosted request was cancelled. It may still have incurred usage.",
+		"request_exists": "This hosted operation already exists. It was not replayed.",
+		"idempotency_conflict": "The hosted request key conflicts with an existing operation. It was not replayed.",
+		"profile_changed": "The hosted capability changed. Refresh Models and retest compatibility.",
+		"rate_limited": "Orca Cloud is busy or rate-limited. Wait before starting another request.",
+		"cloud_request_failed": "Orca Cloud could not complete this request. Check your account and backend connection; completed work has been preserved."
+	}
+	var code := str(raw.get("code", "")) if typeof(raw) == TYPE_DICTIONARY else ""
+	if _response_code == 401:
+		code = "invalid_credentials"
+	elif _response_code == 429:
+		code = "rate_limited"
+	if not messages.has(code):
+		code = "cloud_request_failed"
+	if typeof(raw) == TYPE_DICTIONARY and _cloud_uuid(str(raw.get("request_id", ""))):
+		_cloud_metadata["request_id"] = raw["request_id"]
+	return {"code": code, "message": messages[code], "retryable": false}
+
+
+func _cancel_cloud_operation() -> void:
+	if _configured_provider == "orca_cloud" and account_service != null and _cloud_uuid(str(_cloud_metadata.get("request_id", ""))):
+		account_service.call_deferred("cancel_remote_request", str(_cloud_metadata["request_id"]), str(_request_config_snapshot.get("api_key", "")))
+
+
 func _reset_stream_state() -> void:
+	_cloud_metadata.clear()
+	_cloud_error.clear()
+	_cloud_tool_names.clear()
+	_cloud_event_error = false
+	_deepseek_prefix_filter = null
+	_responses_reply.clear()
+	_responses_arguments.clear()
 	_raw_response.clear()
 	_line_buffer.clear()
 	_event_data_lines.clear()
@@ -874,7 +1238,7 @@ func _normalize_usage(raw_usage) -> Dictionary:
 		total_tokens = input_tokens + output_tokens
 	var cached_value = raw_usage.get("cached_tokens", 0)
 	var cached_tokens := int(cached_value) if typeof(cached_value) in [TYPE_INT, TYPE_FLOAT] else 0
-	var details = raw_usage.get("prompt_tokens_details", {})
+	var details = raw_usage.get("prompt_tokens_details", raw_usage.get("input_tokens_details", {}))
 	if typeof(details) == TYPE_DICTIONARY:
 		var detailed_cached = details.get("cached_tokens", cached_tokens)
 		if typeof(detailed_cached) in [TYPE_INT, TYPE_FLOAT]:

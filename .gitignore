@@ -23,3 +23,7 @@ HANDOVER.md
 .ci/
 .orca_tmp_*
 .orca_backup_*
+.orca-update/
+dist/
+__pycache__/
+.orca_update_editor_test_*/

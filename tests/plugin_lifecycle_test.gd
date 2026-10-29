@@ -6,6 +6,8 @@ const PLUGIN_SCRIPT := "res://addons/orca/orca.gd"
 const CHAT_SCRIPT := "res://addons/orca/scripts/chat_window.gd"
 const DIAGNOSTICS_SCRIPT := "res://addons/orca/scripts/diagnostics_service.gd"
 const GAME_PROCESS_SCRIPT := "res://addons/orca/scripts/game_process_service.gd"
+const ACCOUNT_SCRIPT := "res://addons/orca/scripts/account_service.gd"
+const UPDATE_SCRIPT := "res://addons/orca/scripts/update_service.gd"
 const TOOLBAR_SCRIPT := "res://addons/orca/scenes/open_close.gd"
 const WAIT_TIMEOUT_MS := 8000
 
@@ -19,6 +21,12 @@ func _init() -> void:
 
 func _run() -> void:
 	_expect(Engine.is_editor_hint(), "this test must run with --editor")
+	# Opening/closing real dock tabs must wait for editor startup's own addon
+	# activation and layout work, rather than racing a second enable operation.
+	for frame in 60:
+		await process_frame
+	while EditorInterface.get_resource_filesystem().is_scanning():
+		await process_frame
 	_originally_enabled = EditorInterface.is_plugin_enabled(PLUGIN_NAME)
 	if not _originally_enabled:
 		EditorInterface.set_plugin_enabled(PLUGIN_NAME, true)
@@ -26,6 +34,7 @@ func _run() -> void:
 	_expect(started, "Orca should initialize exactly one plugin instance")
 	if started:
 		_assert_active_plugin("initial activation")
+		await _test_dock_open_notifications()
 
 	EditorInterface.set_plugin_enabled(PLUGIN_NAME, false)
 	var stopped := await _wait_until(func(): return _nodes_with_script(PLUGIN_SCRIPT).is_empty())
@@ -34,6 +43,8 @@ func _run() -> void:
 	_expect(_nodes_with_script(TOOLBAR_SCRIPT).is_empty(), "disabling Orca should remove the toolbar control")
 	_expect(_nodes_with_script(DIAGNOSTICS_SCRIPT).is_empty(), "disabling Orca should remove the diagnostics service")
 	_expect(_nodes_with_script(GAME_PROCESS_SCRIPT).is_empty(), "disabling Orca should remove the game process service")
+	_expect(_nodes_with_script(ACCOUNT_SCRIPT).is_empty(), "disabling Orca should remove the account service")
+	_expect(_nodes_with_script(UPDATE_SCRIPT).is_empty(), "disabling Orca should remove the updater service")
 	DiagnosticsService.clear()
 	var disabled_marker := "orca-disabled-logger-%d" % Time.get_ticks_usec()
 	printerr(disabled_marker)
@@ -45,6 +56,7 @@ func _run() -> void:
 	_expect(restarted, "re-enabling Orca should create exactly one fresh plugin instance")
 	if restarted:
 		_assert_active_plugin("re-activation")
+		await _test_dock_open_notifications()
 		DiagnosticsService.clear()
 		var restarted_marker := "orca-restarted-logger-%d" % Time.get_ticks_usec()
 		printerr(restarted_marker)
@@ -70,13 +82,35 @@ func _assert_active_plugin(stage: String) -> void:
 	_expect(chats.size() == 1, stage + " should retain one chat dock")
 	_expect(diagnostics.size() == 1, stage + " should retain one diagnostics service")
 	_expect(game_services.size() == 1, stage + " should retain one game process service")
+	_expect(_nodes_with_script(ACCOUNT_SCRIPT).size() == 1, stage + " should retain one account service")
+	_expect(_nodes_with_script(UPDATE_SCRIPT).size() == 1, stage + " should retain one updater service")
 	_expect(toolbars.size() == 1, stage + " should retain one toolbar control")
 	_expect(plugin.diagnostics_service != null and plugin.diagnostics_service.get_parent() == plugin, stage + " should keep diagnostics plugin-owned")
 	_expect(plugin.game_process_service != null and plugin.game_process_service.get_parent() == plugin, stage + " should keep the game service plugin-owned")
 	if chats.size() == 1:
 		_expect(chats[0].diagnostics_service == plugin.diagnostics_service, stage + " should inject the plugin diagnostics service into the dock")
 		_expect(chats[0].game_process_service == plugin.game_process_service, stage + " should inject the plugin game service into the dock")
+		_expect(chats[0].account_service == plugin.account_service and chats[0].settings_view.account_service == plugin.account_service and chats[0].agent_controller.account_service == plugin.account_service, stage + " should share plugin-owned account state")
+		_expect(chats[0].update_service == plugin.update_service and chats[0].settings_view.update_service == plugin.update_service, stage + " should share one plugin-owned updater")
 	_expect(not plugin._get_dock().is_empty(), stage + " should register the chat window in an editor dock")
+
+
+func _test_dock_open_notifications() -> void:
+	var plugin = _nodes_with_script(PLUGIN_SCRIPT)[0]
+	var chat = plugin.chat_window
+	plugin._set_chat_window_open(false)
+	await process_frame
+	_expect(not chat._connection_first_open_checked, "hidden initialization should retain first-open intent")
+	chat.notify_dock_opened()
+	await process_frame
+	_expect(not chat._connection_first_open_checked and not chat._connection_overlay.visible, "hidden dock notification should not show setup")
+	plugin._set_chat_window_open(true)
+	await process_frame
+	await process_frame
+	_expect(chat._connection_first_open_checked, "actual plugin opening should decide onboarding once")
+	plugin._set_chat_window_open(false)
+	await process_frame
+	_expect(not chat._connection_overlay.visible, "hiding the actual dock should dismiss setup")
 
 
 func _nodes_with_script(script_path: String) -> Array:

@@ -9,13 +9,15 @@ signal probe_cancelled
 const ApiClient = preload("res://addons/orca/scripts/api_client.gd")
 const EndpointPolicy = preload("res://addons/orca/scripts/endpoint_policy.gd")
 const ProviderRegistry = preload("res://addons/orca/scripts/provider_registry.gd")
+const DeepSeekCompatibility = preload("res://addons/orca/scripts/deepseek_response_compatibility.gd")
 
-const PROBE_VERSION := 1
+const PROBE_VERSION := 2
 const PROBE_TIMEOUT_SECONDS := 45.0
 const PROBE_FUNCTION := "orca_agent_probe"
 const MAX_PROBE_ARGUMENT_BYTES := 1024
 const MAX_PROBE_CALL_ID_BYTES := 256
 const MAX_FINAL_CONTENT_BYTES := 1024
+const CONTINUATION_CONTEXT := "ORCA SYNTHETIC CONTINUATION CHECK: The synthetic tool result is available. Return only the exact acknowledgement required by the initial instructions; do not call another tool. This fixed notice tests refreshed system context without including project or user data."
 
 var _api_client
 var _timer: Timer
@@ -26,6 +28,7 @@ var _messages: Array = []
 var _challenge := ""
 var _request_id_serial := 0
 var _expected_request_id := 0
+var account_service
 
 
 func _ready() -> void:
@@ -34,6 +37,8 @@ func _ready() -> void:
 	if _api_client.get_parent() == null:
 		add_child(_api_client)
 	_connect_client()
+	if _api_client.get("account_service") != null or _api_client is ApiClient:
+		_api_client.set("account_service", account_service)
 	_timer = Timer.new()
 	_timer.one_shot = true
 	_timer.wait_time = PROBE_TIMEOUT_SECONDS
@@ -99,7 +104,12 @@ static func create_binding(provider_config: Dictionary) -> Dictionary:
 		"base_url": str(normalized_config.get("base_url", "")),
 		"chat_endpoint": str(endpoint.get("base_url", "")),
 		"model": model,
-		"reasoning_effort": str(normalized_config.get("reasoning_effort", "default"))
+		"reasoning_effort": str(normalized_config.get("reasoning_effort", "default")),
+		"api_mode": provider.api_mode(normalized_config),
+		"continuation_style": str(normalized_config.get("continuation_style", "standard")),
+		"deepseek_format_version": DeepSeekCompatibility.FORMAT_VERSION if DeepSeekCompatibility.enabled(normalized_config) else 0,
+		"hosted_identity": str(normalized_config.get("hosted_identity", "")),
+		"capability_version": str(normalized_config.get("capability_version", ""))
 	}}
 
 
@@ -108,6 +118,13 @@ static func record_matches_binding(record: Dictionary, binding: Dictionary) -> b
 		return false
 	for key in ["probe_version", "provider", "origin", "base_url", "chat_endpoint", "model", "reasoning_effort"]:
 		if record.get(key) != binding.get(key):
+			return false
+	if record.get("api_mode", "chat_completions") != binding.get("api_mode", "chat_completions") or record.get("continuation_style", "standard") != binding.get("continuation_style", "standard"):
+		return false
+	if record.get("deepseek_format_version", 0) != binding.get("deepseek_format_version", 0):
+		return false
+	for key in ["hosted_identity", "capability_version"]:
+		if record.get(key, "") != binding.get(key, ""):
 			return false
 	return true
 
@@ -122,6 +139,12 @@ func _on_request_completed(request_id: int, response: Dictionary) -> void:
 	if request_id != _expected_request_id or not is_running():
 		return
 	_expected_request_id = 0
+	if _provider_config.get("provider") == "orca_cloud":
+		var metadata = response.get("_orca_cloud", {})
+		if typeof(metadata) != TYPE_DICTIONARY or str(metadata.get("turn_binding", "")).is_empty():
+			_fail("The hosted probe did not return a turn binding.")
+			return
+		_provider_config["hosted_turn_binding"] = metadata["turn_binding"]
 	if _state == "first_request":
 		var validated := _validate_first_response(response)
 		if not validated.get("success", false):
@@ -131,6 +154,7 @@ func _on_request_completed(request_id: int, response: Dictionary) -> void:
 		var call_id := str(validated["call_id"])
 		_messages.append(assistant_message)
 		_messages.append({"role": "tool", "tool_call_id": call_id, "content": JSON.stringify({"accepted": true, "challenge": _challenge, "required_reply": "ORCA_AGENT_PROBE_OK " + _challenge})})
+		_messages.append({"role": "system", "content": CONTINUATION_CONTEXT})
 		_state = "second_request"
 		_begin_probe_request(2, "second_request")
 		return
@@ -180,9 +204,22 @@ func _validate_final_response(response: Dictionary) -> String:
 	var message = choices[0].get("message", {})
 	if typeof(message) != TYPE_DICTIONARY or not Array(message.get("tool_calls", [])).is_empty():
 		return "Probe continuation attempted another tool call."
-	var content := str(message.get("content", "")).strip_edges()
-	if content.to_utf8_buffer().size() > MAX_FINAL_CONTENT_BYTES or content != "ORCA_AGENT_PROBE_OK " + _challenge:
-		return "Probe continuation did not return the exact acknowledgement."
+	if typeof(message.get("content")) != TYPE_STRING:
+		return "Probe continuation did not return text acknowledgement content."
+	var content: String = message["content"].strip_edges()
+	if content.to_utf8_buffer().size() > MAX_FINAL_CONTENT_BYTES:
+		return "Probe continuation acknowledgement exceeded the 1 KiB limit."
+	var required := "ORCA_AGENT_PROBE_OK " + _challenge
+	if content != required:
+		var category := "extra formatting or text" if content.contains(required) else "missing or changed acknowledgement/challenge"
+		var preview := content.replace(_challenge, "<challenge>").left(160)
+		var clean := ""
+		for character in preview:
+			if character.unicode_at(0) >= 32:
+				clean += character
+			elif character in ["\n", "\r", "\t"]:
+				clean += " "
+		return "Probe continuation did not return the exact acknowledgement (%s). Synthetic reply: %s" % [category, clean if not clean.is_empty() else "<empty>"]
 	return ""
 
 
@@ -217,7 +254,19 @@ func _begin_probe_request(step: int, expected_state: String) -> void:
 	probe_step_changed.emit(step)
 	if _state != expected_state or _expected_request_id != request_id:
 		return
-	_api_client.send_chat_completion(_messages, [_probe_tool()], _provider_config, {
+	var request_config := _provider_config.duplicate(true)
+	if request_config.get("provider") == "orca_cloud":
+		if account_service == null:
+			_fail("Connect your Orca account before testing Agent tools.")
+			return
+		var auth: Dictionary = await account_service.authorization(str(request_config.get("hosted_identity", "")))
+		if _state != expected_state or _expected_request_id != request_id:
+			return
+		if not auth.get("success", false):
+			_fail("The Orca account connection expired. Reconnect and test again.")
+			return
+		request_config["api_key"] = auth["token"]
+	_api_client.send_chat_completion(_messages, [_probe_tool()], request_config, {
 		"allow_stream_options_retry": false,
 		ApiClient.LIFECYCLE_REQUEST_ID_OPTION: request_id
 	})

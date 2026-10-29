@@ -3,6 +3,8 @@ extends RefCounted
 
 const TaskUtils = preload("res://addons/orca/scripts/task_utils.gd")
 const ImageAttachments = preload("res://addons/orca/scripts/image_attachments.gd")
+const ResponseAttribution = preload("res://addons/orca/scripts/response_attribution.gd")
+const ScriptReferences = preload("res://addons/orca/scripts/script_references.gd")
 
 const SCHEMA_VERSION := 1
 const MAX_SESSIONS := 50
@@ -55,8 +57,11 @@ func save_session(session: Dictionary, make_active: bool = true) -> Dictionary:
 	var sanitized := _sanitize_session(session)
 	if sanitized.is_empty():
 		return {"success": false, "error": "Session data is invalid."}
-	for collection in [session.get("events", []), session.get("continuation", [])]:
+	for collection_name in ["events", "continuation"]:
+		var collection = session.get(collection_name, [])
 		for item in collection:
+			if _invalid_script_references(item, collection_name == "events"):
+				return {"success": false, "error": "Invalid script references; conversation was not saved."}
 			if typeof(item) == TYPE_DICTIONARY and item.has("images") and (typeof(item["images"]) != TYPE_ARRAY or not ImageAttachments.validate_images(item["images"]).is_empty()):
 				return {"success": false, "error": "Invalid image data; conversation was not saved."}
 	var image_error := image_storage_error(sanitized)
@@ -187,10 +192,13 @@ func _sanitize_session(raw: Dictionary) -> Dictionary:
 	var events: Array = []
 	var raw_events = raw.get("events", [])
 	var was_truncated := bool(raw.get("truncated", false)) or _requires_truncation(raw)
-	for collection in [raw_events, raw.get("continuation", [])]:
+	for collection_name in ["events", "continuation"]:
+		var collection = raw.get(collection_name, [])
 		if typeof(collection) != TYPE_ARRAY:
 			continue
 		for item in collection:
+			if _invalid_script_references(item, collection_name == "events"):
+				was_truncated = true
 			if typeof(item) == TYPE_DICTIONARY and item.has("images") and (typeof(item["images"]) != TYPE_ARRAY or not ImageAttachments.validate_images(item["images"]).is_empty()):
 				was_truncated = true
 	if typeof(raw_events) == TYPE_ARRAY:
@@ -224,6 +232,13 @@ func _sanitize_session(raw: Dictionary) -> Dictionary:
 	}
 
 
+func _invalid_script_references(item, is_event: bool) -> bool:
+	if typeof(item) != TYPE_DICTIONARY or not item.has("script_references"):
+		return false
+	var user_owned: bool = item.get("type") == "message" and item.get("kind") == "user" if is_event else item.get("role") == "user"
+	return not user_owned or not ScriptReferences.validate_references(item["script_references"]).is_empty()
+
+
 func _sanitize_event(raw) -> Dictionary:
 	if typeof(raw) != TYPE_DICTIONARY:
 		return {}
@@ -239,8 +254,15 @@ func _sanitize_event(raw) -> Dictionary:
 			event["kind"] = str(raw.get("kind", "assistant")) if str(raw.get("kind", "")) in ["user", "assistant", "error", "status"] else "status"
 			event["mode"] = clampi(int(raw.get("mode", 1)), 0, 1)
 			event["completion"] = str(raw.get("completion", "complete"))
+			if event["kind"] == "assistant":
+				var attribution := ResponseAttribution.sanitize(raw.get("attribution", {}))
+				if not attribution.is_empty():
+					event["attribution"] = attribution
+					event["mode"] = attribution["mode"]
 			if event["kind"] == "user" and typeof(raw.get("images")) == TYPE_ARRAY:
 				event["images"] = _sanitize_images(raw["images"])
+			if event["kind"] == "user" and raw.has("script_references"):
+				event["script_references"] = ScriptReferences.sanitize_references(raw["script_references"])
 			return event
 		"tool":
 			event["id"] = _bounded_text(str(raw.get("id", "")), 160)
@@ -270,6 +292,22 @@ func _sanitize_tool_arguments(raw, tool_name: String = "") -> Dictionary:
 	if typeof(raw) != TYPE_DICTIONARY:
 		return {}
 	var result := {}
+	if tool_name == "inspect_editor_scene":
+		if typeof(raw.get("scope")) == TYPE_STRING and str(raw["scope"]) in ["selection", "scene", "subtree"]:
+			result["scope"] = raw["scope"]
+		for key in ["node_path", "scene_path"]:
+			if typeof(raw.get(key)) == TYPE_STRING:
+				result[key] = _bounded_text(str(raw[key]), 512)
+		for bounds in [["max_nodes", 1, 120], ["max_depth", 0, 16], ["max_properties_per_node", 0, 32]]:
+			# JSON restoration can represent integral limits as floats. This is
+			# display metadata only; live limits also require in-range integers.
+			if typeof(raw.get(bounds[0])) in [TYPE_INT, TYPE_FLOAT]:
+				var limit := float(raw[bounds[0]])
+				if is_finite(limit) and limit == floorf(limit):
+					result[bounds[0]] = int(clampf(limit, bounds[1], bounds[2]))
+		if typeof(raw.get("include_properties")) == TYPE_BOOL:
+			result["include_properties"] = raw["include_properties"]
+		return result
 	if tool_name == "request_work_mode":
 		return result
 	if tool_name == "read_project_skill":
@@ -352,6 +390,8 @@ func _sanitize_continuation(raw) -> Array:
 		result.append({"role": role, "content": _bounded_text(message["content"], MAX_MESSAGE_CHARS)})
 		if role == "user" and typeof(message.get("images")) == TYPE_ARRAY:
 			result.back()["images"] = _sanitize_images(message["images"])
+		if role == "user" and message.has("script_references"):
+			result.back()["script_references"] = ScriptReferences.sanitize_references(message["script_references"])
 	return result
 
 

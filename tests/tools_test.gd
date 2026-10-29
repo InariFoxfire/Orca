@@ -69,6 +69,10 @@ func _test_tool_permissions() -> void:
 		_expect(not plan_names.has(operation_name), "Plan tool definitions must omit external process operation " + operation_name)
 	_expect(plan_names.count("update_tasks") == 1, "Plan tool definitions should include update_tasks exactly once")
 	_expect(plan_names.count("inspect_scene") == 1, "Plan tool definitions should include inspect_scene exactly once")
+	_expect(plan_names.count("inspect_editor_scene") == 1, "Plan should expose live editor inspection exactly once")
+	var live_parameters: Dictionary = _tool_definition(Tools.get_tool_definitions(false), "inspect_editor_scene").get("function", {}).get("parameters", {})
+	_expect(live_parameters.get("additionalProperties") == false and live_parameters.get("properties", {}).get("scope", {}).get("enum") == ["selection", "scene", "subtree"], "live inspection schema must mirror strict read-only scope validation")
+	_expect(not live_parameters.get("properties", {}).has("base_hash"), "live state must never be advertised as a patch base")
 	_expect(plan_names.count("inspect_project_settings") == 1, "Plan tool definitions should include inspect_project_settings exactly once")
 	for tool_name in ["read_project_skill", "inspect_godot_api", "read_gdscript_function", "discover_dependencies"]:
 		_expect(plan_names.count(tool_name) == 1, "Plan tool definitions should include read-only intelligence tool " + tool_name + " exactly once")
@@ -95,6 +99,7 @@ func _test_tool_permissions() -> void:
 	_expect(operation_properties.has("script_path") and operation_properties.has("script_hash"), "script scene operations should expose exact path and hash inputs")
 	_expect(work_names.count("update_tasks") == 1, "Work tool definitions should include update_tasks exactly once")
 	_expect(work_names.count("inspect_scene") == 1, "Work tool definitions should include inspect_scene exactly once")
+	_expect(work_names.count("inspect_editor_scene") == 1, "Work should expose the same live read-only inspector")
 	_expect(work_names.count("inspect_project_settings") == 1, "Work tool definitions should include inspect_project_settings exactly once")
 	for tool_name in ["read_project_skill", "inspect_godot_api", "read_gdscript_function", "discover_dependencies"]:
 		_expect(work_names.count(tool_name) == 1, "Work tool definitions should include read-only intelligence tool " + tool_name + " exactly once")
@@ -192,7 +197,7 @@ func _test_task_tool() -> void:
 func _test_path_boundaries() -> void:
 	for invalid_path in ["/tmp/file.txt", "user://file.txt", "res://../outside.txt", "res://foo/../../outside.txt"]:
 		_expect(not Tools._validate_path(invalid_path, false).is_empty(), "path should be rejected: " + invalid_path)
-	for protected_path in ["res://addons/orca", "res://addons/orca/", "res://addons/orca/scripts/tools.gd"]:
+	for protected_path in ["res://addons/orca", "res://addons/orca/", "res://addons/orca/scripts/tools.gd", "res://.orca-update", "res://.orca-update/backup/orca.gd", "res://.orca-update/staged/orca.gd"]:
 		_expect(Tools._validate_path(protected_path, false).contains("Orca"), "Orca plugin path should be protected: " + protected_path)
 	_expect(Tools._validate_path("res://", false).is_empty(), "project root should be readable")
 	_expect(not Tools._validate_path("res://", true).is_empty(), "project root must not be writable as a file")

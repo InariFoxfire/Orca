@@ -244,7 +244,7 @@ static func _validate_project_file(filepath: String) -> String:
 	if filepath.is_empty() or not filepath.begins_with("res://") or _canonical_res_path(filepath) != filepath:
 		return "filepath must resolve to a canonical path inside res://."
 	if _is_protected_path(filepath):
-		return "Orca cannot inspect its own res://addons/orca/ directory."
+		return "Orca cannot inspect its own plugin or update workspace."
 	var relative := filepath.trim_prefix("res://")
 	var current := ProjectSettings.globalize_path("res://").simplify_path()
 	for component in relative.split("/", false):
@@ -266,7 +266,7 @@ static func _canonical_res_path(path: String) -> String:
 
 static func _is_protected_path(path: String) -> bool:
 	var relative := path.trim_prefix("res://").trim_suffix("/")
-	return relative == "addons/orca" or relative.begins_with("addons/orca/")
+	return relative == "addons/orca" or relative.begins_with("addons/orca/") or relative == ".orca-update" or relative.begins_with(".orca-update/")
 
 
 static func _report(nodes: Array, edges: Array, reasons: PackedStringArray, scan: Dictionary) -> Dictionary:

@@ -4,6 +4,81 @@ All notable changes to Orca are documented in this file.
 
 ## Unreleased
 
+## 1.4.0 - 2026-10-29
+
+Prepared release candidate. Publication is pending the owner's GitHub CI and
+platform acceptance; no release or tag has been created by this preparation.
+
+### Added
+
+- Native GitHub Actions builds for Linux/Windows x86_64 and macOS arm64/x86_64, real isolated vault/protocol/locking/cross-Godot-process acceptance, aggregate helper downloads and a complete versioned plugin ZIP. Release preparation requires all four tested builds and packages them together.
+- Strict complete-platform packaging checks and explicit `--write-manifest` generation for commit-based Godot Asset Library releases, with documented Actions download/local build/manual publication steps.
+- Dismissible in-dock connection overlay with **Sign in / Sign up with Orca**, **Bring your own API key** (including local models), Close and **Set up later**. New unconfigured users see it on their first visible dock opening after account restoration; setup-needed Send reopens it. Drafts remain intact and actions use existing Account/Provider Settings.
+- Connection/account/model preflight before turn activation, referenced-source reads or conversation entries, with distinct restoration feedback and keyless-local support. Setup completion never automatically sends the draft; composer selection survives settings navigation.
+- Daily stable GitHub release checks, a cached dismissible dock update notice, and General Settings manual checking, release notes, automatic-check preference, progress/cancellation and explicit Update & Restart/rollback controls.
+- Bounded official ZIP/file-manifest verification, local-change/stale-hash protection, a project-exclusive updater lock, transactional replacement and a retained verified previous addon. A trusted independent Godot installer waits for editor exit and reopens the same project; a standalone recovery launcher handles missing-addon interruptions.
+- Deterministic addon-only release packaging with an embedded update manifest and checksum, plus a manually dispatched existing-tag package/publish workflow. Existing users install the first updater-equipped package manually once.
+- Account settings tab after System using the supplied profile icon; browser sign-up/sign-in, pairing feedback/cancellation, plan/usage, Console navigation and sign-out.
+- Persistent Orca account connection using a native OS-vault helper and cross-editor refresh locking. Linux x86_64 is packaged/verified; other platform builds remain pending.
+- Managed Orca Cloud provider with an authenticated model catalog, strict metered SSE/idempotency/turn-binding transport, capability-bound Agent checks and private Sol continuation.
+
+- Drag project `.gd` scripts from Godot's FileSystem dock or open-script list into the composer as removable reference chips. Send includes bounded saved/active-unsaved source snapshots for text-only and Chat-only models, retains references with each message/history, and preserves drafts on preflight or pre-tool provider failures. Up to four scripts are supported alongside images; source is capped at 300 lines / 16 KiB per script.
+- Press Tab in the focused prompt box to toggle Plan/Work without changing the draft, selection, caret, or attachments. Held-key repeats are ignored, active turns/approvals and view-only sessions stay locked, and modified Tab retains native behavior. The mode tooltip includes the shortcut.
+- Native code minimaps in both expanded Previous/Proposed diff panes, with click/drag navigation, synchronized scrolling, editor-scaled adaptive widths, GDScript syntax colors, and refined pane frames. Narrow resized review windows stack the panes.
+- One-click **Test & Enable Agent tools**: a successful user-started compatibility check automatically enables the exact profile. The toggle still permits manual opt-out; failure, cancellation, changed profiles, duplicate results, and restored disabled passes do not enable tools.
+- Microsoft Foundry / Azure profile with exact deployment names, Responses/Chat Completions selection, explicit reasoning effort, and DeepSeek Chat continuation settings. Generic OpenAI-compatible requests also support explicit reasoning effort, including `none` for tool-enabled GPT deployments that reject default reasoning on Chat Completions.
+- Stateless streamed Responses API transport with bounded Orca function calls, multimodal inputs, usage normalization, no-tools finalization, and active-turn encrypted reasoning/assistant-phase replay. Requests disable server storage and automatic truncation; internal continuation state is removed at turn end and excluded from saved sessions.
+- Assistant response footers show the full configured model identifier and the generating request's Plan/Work mode using Orca's metadata typography and existing mode accents. Attribution stays accurate through model switches, tool follow-ups, interrupted text, and restored history; legacy answers and local reports are not guessed.
+- Read-only live editor scene inspection for selected nodes, current scene hierarchy, or one subtree, including unsaved node additions and property changes. Supports bounded native UI layout, 2D/3D transforms, visibility/processing values, parent Control/Container context, and script/resource identities.
+- Explicit live-editor provenance, optional expected-scene binding, and bounded/truncated results without a disk patch hash. Live activity groups retain only historical query summaries; saved-scene inspection and mutation guards remain enforced.
+
+### Changed
+
+- Complete native build downloads now use the `orca-package` artifact with `orca-v<version>.zip` and checksum filenames read from `plugin.cfg`, matching release naming without a test suffix.
+- Plugin update controls now live below Language in General Settings. About retains product/version information, links and support; the main-window update notice remains available.
+- Orca Cloud now uses the fixed production HTTPS origin `https://cloud.aiorca.dev` for accounts, browser pairing, Console and the `/v1` API. Managed settings ignore stale saved localhost URLs. Origin-bound credentials require fresh sign-in after upgrading from local development.
+
+### Fixed
+
+- Windows helper pipes now explicitly use LF-only binary mode to match the Godot wrapper. macOS uses current `SecItem` Keychain APIs while preserving the existing service/account record identity; Mac builds are ad-hoc signed, not notarized.
+- Restored the original empty-state title, logo, typography and centered text width after onboarding caused configured users' text to collapse into a narrow vertical column. Setup now lives outside the chat feed, preserves its layout, and leaves the composer available. Dismissal and returning from incomplete setup do not reopen it automatically.
+- Update action buttons display their captions instead of collapsing into blank blocks. About and main-notice actions use text-sized flow layout with wrapping, with readability and click-handler regressions for narrow/larger-font views.
+- Managed models now work after account connection/model selection without subscriber compatibility probes or reasoning configuration; operator-verified capabilities retain runtime origin/account/version and project-approval protections.
+- Fresh hosted greetings no longer fail because UTF-8 byte-based billing reserves were treated as context token limits. Full root instructions/editor context/Work schemas are now exercised by the integration regression; billing remains conservatively reserved separately.
+
+- Azure DeepSeek compatibility handles the observed leaked leading `</think>` delimiter consistently in Chat/Responses streaming and JSON output. Exactly one bounded leading marker is consumed only with explicit DeepSeek compatibility; inline/code markup, repeated markers, wrong challenges, and unrelated profiles retain strict behavior.
+- The Azure Reasoning Continuation selector is available for both APIs. DeepSeek Responses preserves bounded private plain reasoning parts through tool follow-ups, budgets them, and excludes them from visible/stored history. Scoped format-version binding requires older DeepSeek passes to retest without invalidating Standard/GPT passes.
+- Preserve Azure API/continuation selections when saving during provider switches, and refresh compatibility state immediately after URL edits. Explicit check/enable intent is bound to the selected profile and credentials through origin confirmation and discarded if they change.
+- Compatibility checks now bind API mode and continuation style. Azure DeepSeek Chat can explicitly retain `reasoning_content` across tool follow-ups, including custom deployment names. Failed final acknowledgements distinguish extra formatting from changed/missing acknowledgement and show a bounded synthetic reply with the original challenge redacted.
+- Conversations with earlier images can now switch between vision-capable and text-only models in either direction. Text-only requests retain conversation text and prior descriptions with explicit historical-image placeholders; original images/previews remain intact and are sent again when retained context returns to a vision model.
+- Image handling is bound to each active turn, and context budgeting counts the projected request without charging omitted image reserves. New unsupported draft images remain rejected and preserved; model switching feedback is a non-blocking image-action tooltip instead of a conversation-wide error.
+- LM Studio, Ollama, and Local OpenAI-compatible requests now combine Orca's system instructions and refreshed context into one leading system message. This addresses templates that reject follow-up chats or tool continuations with `System message must be at the beginning`, while preserving conversation/tool order and controller-owned history.
+- Agent Compatibility now exercises a fixed, project-free system-context refresh after its synthetic tool result. Probe version 2 requires older editable/overridden-profile passes to be retested and explicitly re-enabled before tools are available.
+
+### Tests
+
+- Updated About-page and privacy-safe support-report expectations for plugin version 1.4.0. Historical 1.3.0 → 1.4.0 updater fixtures remain explicit upgrade/rollback tests.
+- Added controller setup denial and real-editor overlay/Settings/pairing/BYOK/model-selection/draft/no-request regressions, including configured empty-state width/typography, unchanged feed/composer snapshots, first-visible-open/restoration waiting, Close/Escape/Later and hide/reopen, actual plugin opening notifications and 300px normal/1.5×/2× fonts. Fixtures isolate provider credentials, suppress account restoration/update checks and restore preferences.
+- Added update service/metadata/preference/cancellation, actual dirty-editor/workflow/confirmation/narrow-font, archive/path/hash/permission/locking/recovery and real HTTP failure/cancel regressions. Disposable-project acceptance verifies the independent wait/replace/reopen process and validates an actual-source release package without executing downloaded scripts.
+- Added production pairing/Console URL, managed endpoint protection, localhost credential isolation and saved-settings cutover regressions. Adapted the Godot/backend integration's test-only transport to stay on disposable localhost HTTP with the production default.
+- Added script-reference validation/preparation, UTF-8 boundaries, canonical history/projection/budget/compaction, Chat/Responses and mixed-image transport, real tool continuation, persistence/redaction, forced Control drag routing, draft recovery, and narrow chip coverage. Real editor tests cover exact active unsaved source, inactive dirty denial, script-list identity, unchanged disk/dirty state, image/checklist layout, and Tab preservation. The existing two-request image SSE fixture now requires exact script source on both requests.
+- Expanded editor review coverage for long/unequal/empty content, preserved read-only text/highlights, synchronized navigation, responsive layouts, extreme splitter limits, and larger fonts. The same suite verifies actual native minimap click/drag on a display; headless mode checks layout/programmatic scrolling. Linux/X11/OpenGL passed at 2× editor scale, with a rendered synthetic GDScript review visually inspected.
+- Added delimiter split/limit/literal/parity/cancellation, plain-reasoning replay/isolation/bounds/budget/session-redaction, scoped binding, and 13-request localhost Chat/Responses SSE/JSON probe regressions. Exact wrong-acknowledgement and Standard-profile negative controls remain denied.
+- Added real EditorSettings/UI coverage for combined enablement across local/custom/Azure profiles, manual disable/restoration, duplicate/stale results, failure/cancellation, profile/credential/API/style drift, and cancelled/unchanged origin confirmation.
+- Added Responses conversion, output bounds/status/refusal/call identity, byte-fragmented SSE, reasoning isolation, API/style binding, context accounting, controller cleanup, session redaction, settings persistence/narrow layout, and 15-request localhost integration. Covers the Azure 400 negative control, explicit `none`, real synthetic Responses probe, image/multi-tool/no-tools continuation, JSON fallback, incomplete/error/disconnect/Stop, and DeepSeek reasoning retention. No live Azure inference gate was exercised.
+- Added bounded model/mode metadata, terminal reentry, stale callback, Plan-to-Work refresh, plain/code footer, interrupted/restored answer, and legacy omission regressions. Real editor layout checks cover long IDs and normal/1.5×/2× metadata fonts without mode overlap or dock widening.
+- Added model-switch/projection/budget/compaction/restoration/cancellation/failure/draft regressions and expanded the image HTTP/SSE fixture to ten requests, including repeated text → vision → text → vision transitions, exact image-byte retention, matching tool continuations, and pixel-free text-only payloads.
+- Added native-getter isolation, argument/path/reference/internal-node boundaries, selection/depth/node/output/time limits, and real-editor unsaved-state regressions. Added a deterministic menu inspect/save/review/Apply/reinspect/Revert workflow and live-activity history redaction checks.
+- Added local-provider message-layout, source-history isolation, multimodal/opaque tool metadata preservation, and old-probe permission regressions.
+- Added a strict localhost template fixture that rejects the original layout with HTTP 500 and accepts second user turns, tool continuations, and no-tools finalization for all three local profiles. The existing probe integration now also enforces one leading system message and retained synthetic refresh context.
+
+### Known Limits
+
+- Linux native-vault and headless updater installation/rollback/relaunch are verified. Windows/macOS native CI execution and downloaded-plugin/update acceptance remain pending. Mac helpers are ad-hoc signed, not Developer ID signed or notarized.
+- The first updater-equipped package must be installed manually once. Updates require explicit user confirmation and preserve locally modified addons. Commit-based Asset Library downloads need the tested helper binaries and matching generated manifest in the selected release commit.
+- Vision/tool capability declarations and synthetic compatibility probes do not establish model quality. Live model/project workflows, actual script-list mouse dragging, OS clipboard behavior and broader theme/platform acceptance remain separate checks.
+- Desktop images still use the separate native attachment window; dropping them onto the main editor invokes Godot import. Private reasoning and revert checkpoints remain active-turn/in-memory only, respectively.
+
 ## 1.3.0 - 2026-10-13
 
 ### Added

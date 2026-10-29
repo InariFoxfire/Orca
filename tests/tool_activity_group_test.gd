@@ -47,6 +47,17 @@ func _run() -> void:
 	await process_frame
 	_expect(scene_group.get_combined_minimum_size().x <= 300.0, "scene inspection groups should remain within 300 px")
 	scene_group.queue_free()
+	var live_group = ToolActivityGroup.new()
+	get_root().add_child(live_group)
+	await process_frame
+	var live_card = live_group.add_tool("live_1", "inspect_editor_scene", {"scope": "subtree", "node_path": "Menu/" + "Panel".repeat(80)})
+	live_group.complete_tool("live_1", {"content": "Live editor snapshot", "outcome": "completed", "data": {"source": "editor_scene"}}, 10)
+	_expect(live_group._header_button.text.contains("Inspect live scene") and live_group._header_button.text.contains("Menu/"), "live grouped activity must retain its readable scope target")
+	live_group.set_expanded(true)
+	live_card._toggle_details()
+	await process_frame
+	_expect(not live_card._open_button.visible and live_group.get_combined_minimum_size().x <= 300.0, "live snapshot activity must fit narrow docks without a stale scene-opening action")
+	live_group.queue_free()
 	var settings_group = ToolActivityGroup.new()
 	get_root().add_child(settings_group)
 	await process_frame

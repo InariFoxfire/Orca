@@ -21,6 +21,7 @@ func _run() -> void:
 		await process_frame
 	_expect(result.get("kind") == "passed", "two-step localhost compatibility probe should pass: " + str(result))
 	_expect(result.get("binding", {}).get("origin") == "http://127.0.0.1:18473" and result.get("binding", {}).get("model") == "probe-model", "probe result should retain the exact normalized binding")
+	_expect(result.get("binding", {}).get("probe_version") == Probe.PROBE_VERSION, "strict-template continuation should establish only the updated probe version")
 	probe.queue_free()
 	await process_frame
 	_finish()

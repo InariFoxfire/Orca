@@ -199,13 +199,16 @@ func _show_expanded_diff() -> void:
 	dialog.add_child(margin)
 	var layout := VBoxContainer.new()
 	margin.add_child(layout)
-	var panes: SplitContainer
-	if dialog.size.x >= UiMetrics.scaled(800):
-		panes = HSplitContainer.new()
-	else:
-		panes = VSplitContainer.new()
+	var panes := SplitContainer.new()
+	panes.vertical = dialog.size.x < UiMetrics.scaled(800)
 	panes.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	layout.add_child(panes)
+	dialog.size_changed.connect(func():
+		var vertical := dialog.size.x < UiMetrics.scaled(800)
+		if panes.vertical != vertical:
+			panes.vertical = vertical
+			panes.split_offsets = PackedInt32Array([0])
+	)
 	var old_edit := _create_code_pane(panes, "Previous", str(_proposal.get("old_content", "")))
 	var new_edit := _create_code_pane(panes, "Proposed", str(_proposal.get("new_content", "")))
 	_highlight_changed_lines(old_edit, new_edit)
@@ -256,17 +259,50 @@ func _open_changed_file() -> void:
 func _create_code_pane(parent: Control, title: String, content: String) -> CodeEdit:
 	var pane := VBoxContainer.new()
 	pane.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	pane.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	pane.custom_minimum_size.x = maxf(0, minf(UiMetrics.scaled(240), parent.get_window().size.x - UiMetrics.scaled(20)))
+	pane.add_theme_constant_override("separation", UiMetrics.scaled_int(8))
 	parent.add_child(pane)
 	var label := Label.new()
 	label.text = title
 	pane.add_child(label)
 	var editor := CodeEdit.new()
+	if Engine.is_editor_hint():
+		editor.theme = EditorInterface.get_editor_theme()
+		if str(_proposal.get("filepath", "")).get_extension().to_lower() == "gd":
+			editor.syntax_highlighter = GDScriptSyntaxHighlighter.new()
 	editor.text = content
 	editor.editable = false
 	editor.gutters_draw_line_numbers = true
+	editor.wrap_mode = TextEdit.LINE_WRAPPING_NONE
+	editor.scroll_past_end_of_file = false
+	editor.minimap_draw = true
+	editor.minimap_width = UiMetrics.scaled_int(72)
+	editor.add_theme_constant_override("minimap_char_width", UiMetrics.scaled_int(1))
+	# Godot's native change markers use a fixed 3 px row (2 px ink + 1 px gap).
+	editor.add_theme_constant_override("minimap_char_height", 2)
+	editor.add_theme_constant_override("minimap_line_spacing", 1)
+	# Keep native syntax colors, but restore the charcoal review surface in dark themes.
+	var normal := editor.get_theme_stylebox("normal").duplicate() as StyleBoxFlat
+	if normal != null:
+		if normal.bg_color.get_luminance() < 0.5:
+			normal.bg_color = Color("#1a1a1a")
+		normal.set_corner_radius_all(UiMetrics.scaled_int(6))
+		normal.set_border_width_all(UiMetrics.scaled_int(1))
+		normal.border_color = editor.get_theme_color("font_color") * Color(1, 1, 1, 0.06)
+		normal.set_content_margin_all(UiMetrics.scaled(8))
+		editor.add_theme_stylebox_override("normal", normal)
+		editor.add_theme_stylebox_override("read_only", normal)
+	editor.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	editor.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	editor.resized.connect(_sync_minimap_width.bind(editor))
 	pane.add_child(editor)
 	return editor
+
+
+func _sync_minimap_width(editor: CodeEdit) -> void:
+	# Leave most of each pane for readable code, including after splitter drags.
+	editor.minimap_width = roundi(clampf(editor.size.x * 0.16, UiMetrics.scaled(44), UiMetrics.scaled(88)))
 
 
 func _highlight_changed_lines(old_edit: CodeEdit, new_edit: CodeEdit) -> void:

@@ -18,6 +18,8 @@ const DEEPSEEK_IMAGE_INPUT := {
 
 static func resolve(config: Dictionary) -> String:
 	var provider_id := str(config.get("provider", ""))
+	if provider_id == "orca_cloud":
+		return "supported" if config.get("hosted_image_input") == true and config.get("hosted_allowed") == true and not str(config.get("hosted_identity", "")).is_empty() else "unsupported"
 	var provider = ProviderRegistry.get_provider(provider_id)
 	var cache := Config.get_cached_provider_models(provider_id, provider.models_url(config), str(config.get("api_key", "")).strip_edges().sha256_text().left(16))
 	for model in cache.get("models", []):

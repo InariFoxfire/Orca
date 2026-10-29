@@ -1,0 +1,82 @@
+name: Prepare Orca release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable tag matching plugin.cfg (e.g. v1.4.0)
+        required: true
+        type: string
+      publish:
+        description: Publish a GitHub Release after checks (otherwise artifact only)
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  native-helpers:
+    uses: ./.github/workflows/native_helpers.yml
+    with:
+      ref: ${{ inputs.tag }}
+
+  package:
+    needs: native-helpers
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      ORCA_DISABLE_ACCOUNT_RESTORE: "1"
+      ORCA_DISABLE_UPDATE_CHECKS: "1"
+      GODOT_BIN: ${{ github.workspace }}/.ci/Godot_v4.7.2-stable_linux.x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: orca-helper-*
+          merge-multiple: true
+          path: addons/orca/native
+      - name: Validate stable tag
+        run: |
+          python3 -c 'import os,re; assert re.fullmatch(r"v(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})", os.environ["RELEASE_TAG"])'
+      - name: Install Godot and restore helper permissions
+        run: |
+          mkdir -p .ci dist
+          curl --fail --location --retry 3 --output .ci/godot.zip https://github.com/godotengine/godot/releases/download/4.7.2-stable/Godot_v4.7.2-stable_linux.x86_64.zip
+          unzip -q .ci/godot.zip -d .ci
+          chmod +x "$GODOT_BIN"
+          chmod 755 addons/orca/native/credential_helper_linux.x86_64 addons/orca/native/credential_helper_windows.x86_64.exe addons/orca/native/credential_helper_macos.arm64 addons/orca/native/credential_helper_macos.x86_64
+      - name: Initialize and verify updater
+        run: |
+          "$GODOT_BIN" --headless --editor --path . --quit
+          "$GODOT_BIN" --headless --path . --script res://tests/update_service_test.gd
+          "$GODOT_BIN" --headless --editor --path . --script res://tests/update_editor_test.gd
+          python3 -m unittest discover -s tests -p update_package_test.py
+          python3 -m unittest discover -s tests -p native_helper_packaging_test.py
+      - name: Build addon-only archive
+        run: python3 scripts/package_release.py --version "${RELEASE_TAG#v}" --require-platform-helpers --output "dist/orca-${RELEASE_TAG}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orca-release
+          path: dist/*
+
+  publish:
+    if: inputs.publish
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: orca-release
+          path: dist
+      - name: Publish selected tag
+        run: gh release create "$RELEASE_TAG" "dist/orca-${RELEASE_TAG}.zip" "dist/orca-${RELEASE_TAG}.zip.sha256" --verify-tag --title "Orca ${RELEASE_TAG}" --generate-notes

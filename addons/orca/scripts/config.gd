@@ -76,6 +76,8 @@ static func get_active_provider_config() -> Dictionary:
 		"base_url": get_api_url(),
 		"model": get_model(),
 		"reasoning_effort": get_reasoning_effort(),
+		"api_mode": _get_provider_value(get_provider(), "api_mode", ProviderRegistry.get_provider(get_provider()).definition().get("default_api_mode", "chat_completions")),
+		"continuation_style": _get_provider_value(get_provider(), "continuation_style", "standard"),
 		"confirmed_origin": get_confirmed_origin(get_provider()),
 		"agent_compatibility": get_agent_compatibility(get_provider()),
 		"image_input_override": _get_provider_value(get_provider(), "image_input_override", {})
@@ -87,30 +89,40 @@ static func get_provider_config(provider_id: String) -> Dictionary:
 	return {
 		"provider": provider_id,
 		"api_key": get_api_key(provider_id),
-		"base_url": str(_get_provider_value(provider_id, "base_url", definition.get("base_url", ""))),
+		# Managed origins are release-owned, including after a deployment cutover.
+		"base_url": str(definition.get("base_url", "")) if bool(definition.get("managed_auth", false)) else str(_get_provider_value(provider_id, "base_url", definition.get("base_url", ""))),
 		"model": str(_get_provider_value(provider_id, "model", definition.get("default_model", ""))),
 		"reasoning_effort": str(_get_provider_value(provider_id, "reasoning_effort", "default")),
+		"api_mode": _get_provider_value(provider_id, "api_mode", definition.get("default_api_mode", "chat_completions")),
+		"continuation_style": _get_provider_value(provider_id, "continuation_style", "standard"),
 		"confirmed_origin": get_confirmed_origin(provider_id),
 		"agent_compatibility": get_agent_compatibility(provider_id),
 		"image_input_override": _get_provider_value(provider_id, "image_input_override", {})
 	}
 
 
-static func save_provider_config(provider_id: String, api_key: String, model: String, reasoning_effort: String, base_url: String = "") -> bool:
+static func save_provider_config(provider_id: String, api_key: String, model: String, reasoning_effort: String, base_url: String = "", api_mode: String = "", continuation_style: String = "standard") -> bool:
 	var settings = _get_editor_settings()
 	if not settings:
 		return false
-	if not save_provider_profile(provider_id, api_key, model, reasoning_effort, base_url):
+	if not save_provider_profile(provider_id, api_key, model, reasoning_effort, base_url, api_mode, continuation_style):
 		return false
 	settings.set_setting(SETTING_PROVIDER, provider_id)
 	return true
 
 
-static func save_provider_profile(provider_id: String, api_key: String, model: String, reasoning_effort: String, base_url: String = "") -> bool:
+static func save_provider_profile(provider_id: String, api_key: String, model: String, reasoning_effort: String, base_url: String = "", api_mode: String = "", continuation_style: String = "standard") -> bool:
 	var settings = _get_editor_settings()
 	if not settings:
 		return false
 	var definition: Dictionary = ProviderRegistry.get_provider(provider_id).definition()
+	if bool(definition.get("managed_auth", false)):
+		api_key = "" # Account credentials are exclusively owned by the OS-vault service.
+		base_url = str(definition.get("base_url", ""))
+		continuation_style = "standard" # Effective continuation comes from the live catalog.
+	api_mode = str(definition.get("default_api_mode", "chat_completions")) if api_mode.is_empty() else api_mode
+	if api_mode not in ["chat_completions", "responses"] or continuation_style not in ["standard", "deepseek"] or (provider_id != "azure" and (api_mode != "chat_completions" or continuation_style != "standard")):
+		return false
 	var normalized_base := base_url
 	if bool(definition.get("custom_url", false)):
 		var inspected := EndpointPolicy.inspect_base_url(base_url)
@@ -120,6 +132,8 @@ static func save_provider_profile(provider_id: String, api_key: String, model: S
 	settings.set_setting(_provider_setting(provider_id, "api_key"), api_key)
 	settings.set_setting(_provider_setting(provider_id, "model"), model)
 	settings.set_setting(_provider_setting(provider_id, "reasoning_effort"), reasoning_effort)
+	settings.set_setting(_provider_setting(provider_id, "api_mode"), api_mode)
+	settings.set_setting(_provider_setting(provider_id, "continuation_style"), continuation_style)
 	if bool(definition.get("custom_url", false)):
 		settings.set_setting(_provider_setting(provider_id, "base_url"), normalized_base)
 	return true
@@ -284,6 +298,8 @@ static func _ensure_provider_settings(settings: EditorSettings, provider_id: Str
 		["api_key", ""],
 		["model", definition.get("default_model", "")],
 		["reasoning_effort", "default"],
+		["api_mode", definition.get("default_api_mode", "chat_completions")],
+		["continuation_style", "standard"],
 		["base_url", definition.get("base_url", "")],
 		["confirmed_origin", ""],
 		["agent_compatibility", {}]

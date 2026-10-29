@@ -1,0 +1,94 @@
+name: Native credential helpers
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact source ref to build (empty uses the caller's commit)
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            helper: credential_helper_linux.x86_64
+          - runner: windows-2022
+            helper: credential_helper_windows.x86_64.exe
+          - runner: macos-15
+            helper: credential_helper_macos.arm64
+          - runner: macos-15-intel
+            helper: credential_helper_macos.x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      ORCA_DISABLE_ACCOUNT_RESTORE: "1"
+      ORCA_DISABLE_UPDATE_CHECKS: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install isolated Linux vault dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev gnome-keyring dbus libglib2.0-bin
+      - name: Build native helper
+        run: python scripts/build_native_helper.py
+      - name: Install pinned Godot
+        run: python scripts/install_ci_godot.py
+      - name: Test native protocol, vault, locking and editor-process persistence
+        run: python scripts/test_native_credentials.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orca-helper-${{ matrix.helper }}
+          path: addons/orca/native/${{ matrix.helper }}
+          if-no-files-found: error
+          retention-days: 14
+
+  bundle:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: orca-helper-*
+          merge-multiple: true
+          path: addons/orca/native
+      - name: Validate the complete platform set and package the addon
+        run: |
+          mkdir -p .ci
+          chmod 755 addons/orca/native/credential_helper_linux.x86_64 addons/orca/native/credential_helper_windows.x86_64.exe addons/orca/native/credential_helper_macos.arm64 addons/orca/native/credential_helper_macos.x86_64
+          version=$(python -c 'import configparser; config = configparser.ConfigParser(interpolation=None); config.read("addons/orca/plugin.cfg", encoding="utf-8"); print(config["plugin"]["version"].strip("\""))')
+          python scripts/package_release.py --version "$version" --require-platform-helpers --output ".ci/orca-v${version}.zip"
+          tar -czf .ci/orca-native-helpers.tar.gz addons/orca/native/credential_helper_linux.x86_64 addons/orca/native/credential_helper_windows.x86_64.exe addons/orca/native/credential_helper_macos.arm64 addons/orca/native/credential_helper_macos.x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orca-native-helpers
+          path: .ci/orca-native-helpers.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orca-package
+          path: .ci/orca-v*.zip*
+          if-no-files-found: error
+          retention-days: 14

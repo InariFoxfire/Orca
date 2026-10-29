@@ -1,6 +1,7 @@
 extends SceneTree
 
 const Probe = preload("res://addons/orca/scripts/agent_compatibility_probe.gd")
+const Config = preload("res://addons/orca/scripts/config.gd")
 
 class FakeApiClient extends Node:
 	signal request_completed(request_id: int, response: Dictionary)
@@ -32,8 +33,10 @@ func _init() -> void:
 
 func _run() -> void:
 	await _test_valid_round_trip()
+	_test_probe_version_binding()
 	await _test_invalid_challenge_and_cancellation()
 	await _test_synchronous_step_cancellation()
+	_test_acknowledgement_diagnostics()
 	_finish()
 
 
@@ -57,9 +60,11 @@ func _test_valid_round_trip() -> void:
 	fake.request_completed.emit(first_id, {"choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [{"id": "probe-call", "type": "function", "function": {"name": Probe.PROBE_FUNCTION, "arguments": "{\"challenge\":\"fixed-challenge\"}"}, "extra_content": {"opaque": "retained"}}]}}]})
 	_expect(fake.requests.size() == 2, "valid step one should start the continuation")
 	var continuation_messages: Array = fake.requests[1].get("messages", [])
-	_expect(continuation_messages.size() == 4, "continuation should contain only synthetic system, user, assistant, and tool messages")
+	_expect(continuation_messages.size() == 5, "continuation should include synthetic refreshed system context after the matching tool result")
 	_expect(continuation_messages[2].get("tool_calls", [])[0].get("extra_content", {}).get("opaque") == "retained", "continuation should preserve opaque assistant tool metadata")
 	_expect(continuation_messages[3].get("role") == "tool" and continuation_messages[3].get("tool_call_id") == "probe-call", "synthetic result should match the exact provider call ID")
+	_expect(continuation_messages[4] == {"role": "system", "content": Probe.CONTINUATION_CONTEXT}, "probe should exercise later system context through the real provider adapter")
+	_expect(not JSON.stringify(continuation_messages).contains("res://"), "refreshed probe context must remain project-free")
 	_expect(fake.requests[1].get("options", {}).get("allow_stream_options_retry") == false, "probe continuation must not silently retry with a changed request after a tool result")
 	var second_id := int(fake.requests[1].get("options", {}).get("lifecycle_request_id", 0))
 	_expect(second_id > first_id, "probe continuation should use a distinct lifecycle request ID")
@@ -71,6 +76,18 @@ func _test_valid_round_trip() -> void:
 	_expect(not passed.is_empty() and passed.get("provider") == "ollama" and passed.get("model") == "fixture-model", "exact continuation acknowledgement should pass the bound probe")
 	probe.queue_free()
 	await process_frame
+
+
+func _test_probe_version_binding() -> void:
+	var config := _config()
+	var binding: Dictionary = Probe.create_binding(config)["binding"]
+	var record := binding.duplicate(true)
+	record["enabled"] = true
+	config["agent_compatibility"] = record
+	_expect(Config.agent_compatibility_status("ollama", config).get("enabled", false), "an exact current-version pass and opt-in should allow tools")
+	record["probe_version"] = Probe.PROBE_VERSION - 1
+	var status := Config.agent_compatibility_status("ollama", config)
+	_expect(not status.get("passed", true) and not status.get("enabled", true), "older probe passes must fail closed after the refreshed-context contract changes")
 
 
 func _test_invalid_challenge_and_cancellation() -> void:
@@ -107,6 +124,17 @@ func _test_synchronous_step_cancellation() -> void:
 	_expect(cancelled[0] == 1 and fake.requests.is_empty() and not probe.is_running(), "cancellation from a probe-step signal must not launch an orphan request")
 	probe.queue_free()
 	await process_frame
+
+
+func _test_acknowledgement_diagnostics() -> void:
+	var probe := DeterministicProbe.new()
+	probe._challenge = "fixed-challenge"
+	var error: String = probe._validate_final_response({"choices": [{"message": {"content": "`ORCA_AGENT_PROBE_OK fixed-challenge`"}}]})
+	_expect(error.contains("extra formatting") and error.contains("<challenge>") and not error.contains("fixed-challenge"), "synthetic diagnostics should distinguish formatting and redact the exact challenge")
+	error = probe._validate_final_response({"choices": [{"message": {"content": "incorrect acknowledgement"}}]})
+	_expect(error.contains("changed acknowledgement") and error.contains("incorrect acknowledgement"), "diagnostics should provide bounded synthetic reply evidence without weakening the gate")
+	_expect(probe._validate_final_response({"choices": [{"message": {"content": "ORCA_AGENT_PROBE_OK fixed-challenge"}}]}).is_empty(), "only the exact correct acknowledgement should pass")
+	probe.free()
 
 
 func _config() -> Dictionary:

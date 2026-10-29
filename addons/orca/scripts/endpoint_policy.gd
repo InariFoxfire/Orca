@@ -15,6 +15,10 @@ static func inspect_endpoint(raw_url: String) -> Dictionary:
 static func authorize_profile(provider_id: String, config: Dictionary) -> Dictionary:
 	var provider = ProviderRegistry.get_provider(provider_id)
 	var definition: Dictionary = provider.definition()
+	if bool(definition.get("managed_auth", false)) and (str(config.get("base_url", "")) != str(definition.get("base_url", "")) or provider.api_mode(config) != "chat_completions"):
+		return _failure("Orca account credentials can only be sent to the configured Orca Cloud endpoint.")
+	if provider_id == "azure" and (provider.api_mode(config) not in ["responses", "chat_completions"] or config.get("continuation_style", "standard") not in ["standard", "deepseek"]):
+		return _failure("Select a supported Azure API and continuation style.")
 	if not bool(definition.get("custom_url", false)):
 		var canonical := inspect_base_url(str(definition.get("base_url", "")))
 		if not canonical.get("success", false):
@@ -108,8 +112,8 @@ static func _inspect_url(raw_url: String, base_mode: bool) -> Dictionary:
 		return _failure("URL path must not contain dot segments.")
 	if base_mode:
 		var lower_path := path.to_lower()
-		if lower_path.ends_with("/models") or lower_path.ends_with("/chat/completions"):
-			return _failure("Enter a base URL, not a complete models or chat/completions endpoint.")
+		if lower_path.ends_with("/models") or lower_path.ends_with("/chat/completions") or lower_path.ends_with("/responses"):
+			return _failure("Enter a base URL, not a complete models, chat/completions, or responses endpoint.")
 	var default_port := (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
 	var normalized_authority := host_for_url + ("" if default_port else ":" + str(port))
 	var origin := "%s://%s:%d" % [scheme, host_for_url, port]

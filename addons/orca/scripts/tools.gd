@@ -7,6 +7,7 @@ const EditorContext = preload("res://addons/orca/scripts/editor_context.gd")
 const DiagnosticsService = preload("res://addons/orca/scripts/diagnostics_service.gd")
 const TaskUtils = preload("res://addons/orca/scripts/task_utils.gd")
 const SceneInspector = preload("res://addons/orca/scripts/scene_inspector.gd")
+const EditorSceneInspector = preload("res://addons/orca/scripts/editor_scene_inspector.gd")
 const ProjectSettingsInspector = preload("res://addons/orca/scripts/project_settings_inspector.gd")
 const InputMapProposal = preload("res://addons/orca/scripts/input_map_proposal.gd")
 const MainSceneProposal = preload("res://addons/orca/scripts/main_scene_proposal.gd")
@@ -119,7 +120,7 @@ static func get_tool_definitions(include_edit_tools: bool = true, include_work_m
 			"type": "function",
 			"function": {
 				"name": "inspect_scene",
-				"description": "Inspects the saved structure of a Godot .tscn scene through PackedScene/SceneState without instantiating nodes. Returns bounded node hierarchy, groups, instances, serialized properties, and signal connections. Unsaved scenes must be saved first.",
+				"description": "Inspects saved Godot .tscn structure through PackedScene/SceneState without instantiation. Returns bounded hierarchy, groups, instances, serialized properties, and signals. Start with include_properties=false when locating nodes. Use inspect_editor_scene for current unsaved editor state; saved inspection requires a clean scene.",
 				"parameters": {
 					"type": "object",
 					"properties": {
@@ -129,6 +130,26 @@ static func get_tool_definitions(include_edit_tools: bool = true, include_work_m
 						"max_properties_per_node": {"type": "integer", "description": "Maximum serialized properties per node, clamped to 0-24."}
 					},
 					"required": ["scene_path"]
+				}
+			}
+		},
+		{
+			"type": "function",
+			"function": {
+				"name": "inspect_editor_scene",
+				"description": "Reads a bounded live snapshot of the current edited scene, including unsaved changes. Defaults to selected nodes; use scene with include_properties=false to locate nodes, then subtree for focused properties. Returns allowlisted native layout/transforms/state and script/resource references, not custom getters, runtime gameplay, or a disk patch hash.",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"scope": {"type": "string", "enum": EditorSceneInspector.SCOPES, "description": "Defaults to selection (selected nodes only). scene/subtree traverse descendants."},
+						"node_path": {"type": "string", "minLength": 1, "maxLength": EditorSceneInspector.MAX_PATH_CHARS, "description": "Required only for subtree. Relative to the current scene root, e.g. '.' or 'Menu/Panel'."},
+						"scene_path": {"type": "string", "minLength": 1, "maxLength": EditorSceneInspector.MAX_PATH_CHARS, "description": "Optional expected res:// scene path from editor context; rejects a changed active scene. Omit for a new unnamed scene."},
+						"include_properties": {"type": "boolean", "description": "Include allowlisted built-in values and resource references. Defaults to true."},
+						"max_nodes": {"type": "integer", "minimum": 1, "maximum": EditorSceneInspector.MAX_NODES, "description": "Defaults to 60."},
+						"max_depth": {"type": "integer", "minimum": 0, "maximum": EditorSceneInspector.MAX_DEPTH, "description": "Descendant depth from the scope root, defaults to 4. Zero reads only scope roots."},
+						"max_properties_per_node": {"type": "integer", "minimum": 0, "maximum": EditorSceneInspector.MAX_PROPERTIES_PER_NODE, "description": "Defaults to 32."}
+					},
+					"additionalProperties": false
 				}
 			}
 		},
@@ -462,7 +483,7 @@ static func execute_tool(tool_name: String, arguments: Dictionary, game_process_
 			)
 		"get_editor_context":
 			var context := EditorContext.capture()
-			return _tool_success(EditorContext.format_for_model(context), context)
+			return _tool_success(EditorContext.format_for_model(context), context, JSON.stringify(context) if not context.is_empty() else "")
 		"get_diagnostics":
 			var game_snapshot: Dictionary = game_process_service.get_snapshot() if game_process_service != null and game_process_service.has_method("get_snapshot") else {}
 			var report := DiagnosticsService.get_report(game_snapshot)
@@ -522,16 +543,28 @@ static func execute_tool(tool_name: String, arguments: Dictionary, game_process_
 				return _tool_error("scene_path must be a string.")
 			if arguments.has("include_properties") and typeof(arguments["include_properties"]) != TYPE_BOOL:
 				return _tool_error("include_properties must be a boolean.")
-			if arguments.has("max_nodes") and typeof(arguments["max_nodes"]) != TYPE_INT:
+			if arguments.has("max_nodes") and not _is_integer_number(arguments["max_nodes"]):
 				return _tool_error("max_nodes must be an integer.")
-			if arguments.has("max_properties_per_node") and typeof(arguments["max_properties_per_node"]) != TYPE_INT:
+			if arguments.has("max_properties_per_node") and not _is_integer_number(arguments["max_properties_per_node"]):
 				return _tool_error("max_properties_per_node must be an integer.")
 			return _inspect_scene(
 				arguments.get("scene_path", ""),
 				bool(arguments.get("include_properties", true)),
-				int(arguments.get("max_nodes", SceneInspector.MAX_NODES)),
-				int(arguments.get("max_properties_per_node", SceneInspector.MAX_PROPERTIES_PER_NODE))
+				int(clampf(float(arguments.get("max_nodes", SceneInspector.MAX_NODES)), 1, SceneInspector.MAX_NODES)),
+				int(clampf(float(arguments.get("max_properties_per_node", SceneInspector.MAX_PROPERTIES_PER_NODE)), 0, SceneInspector.MAX_PROPERTIES_PER_NODE))
 			)
+		"inspect_editor_scene":
+			var inspection := EditorSceneInspector.inspect(arguments, _validate_path)
+			if not inspection.get("success", false):
+				return _tool_error(str(inspection.get("error", "Could not inspect the current editor scene.")))
+			var report: Dictionary = inspection.get("report", {})
+			return _tool_success(str(inspection.get("content", "{}")), {
+				"source": "editor_scene",
+				"scope": str(report.get("scope", "selection")),
+				"returned_node_count": int(report.get("returned_node_count", 0)),
+				"unsaved_changes": bool(report.get("unsaved_changes", false)),
+				"truncated": bool(report.get("truncation", {}).get("truncated", false))
+			}, JSON.stringify(report))
 		"inspect_project_settings":
 			for argument_name in arguments:
 				if str(argument_name) != "setting_path":
@@ -650,7 +683,7 @@ static func _inspect_scene(filepath: String, include_properties: bool, max_nodes
 		"scene_node_count": int(report.get("scene_node_count", 0)),
 		"returned_node_count": int(report.get("returned_node_count", 0)),
 		"truncated": bool(report.get("truncation", {}).get("truncated", false))
-	})
+	}, JSON.stringify(report))
 
 static func _list_directory(path: String) -> Dictionary:
 	var validation_error := _validate_path(path, false)
@@ -1598,7 +1631,7 @@ static func _validate_path(filepath: String, for_writing: bool) -> String:
 	var relative_path := "" if absolute_path == project_root else absolute_path.trim_prefix(project_root + "/")
 	if _path_contains_symlink(project_root, relative_path):
 		return "Paths containing symbolic links are blocked."
-	if relative_path == "addons/orca" or relative_path.begins_with("addons/orca/"):
+	if relative_path == "addons/orca" or relative_path.begins_with("addons/orca/") or relative_path == ".orca-update" or relative_path.begins_with(".orca-update/"):
 		return "Access to Orca's own plugin files is blocked."
 	if for_writing and relative_path.is_empty():
 		return "The project root cannot be written as a file."
@@ -1913,8 +1946,17 @@ static func _first_diagnostic_location(report: Dictionary) -> Dictionary:
 	return {}
 
 
-static func _tool_success(content: String, data: Dictionary = {}) -> Dictionary:
-	return {"success": true, "content": content, "outcome": "completed", "data": data}
+static func _is_integer_number(value) -> bool:
+	# Godot decodes JSON integer literals as floats. Clamp only after validating
+	# mathematical integrality, and before converting potentially huge numbers.
+	return typeof(value) == TYPE_INT or (typeof(value) == TYPE_FLOAT and is_finite(value) and value == floorf(value))
+
+
+static func _tool_success(content: String, data: Dictionary = {}, model_content: String = "") -> Dictionary:
+	var result := {"success": true, "content": content, "outcome": "completed", "data": data}
+	if not model_content.is_empty():
+		result["model_content"] = model_content
+	return result
 
 
 static func _tool_error(message: String, data: Dictionary = {}) -> Dictionary:

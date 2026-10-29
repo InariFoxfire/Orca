@@ -127,6 +127,12 @@ class FakeGameProcessService:
 		return {"success": true, "verification": {"run_id": run_id, "status": str(snapshot.get("verification_status", "unverified")), "claim": "fixture", "checks": []}}
 
 
+class ProfileController extends "res://addons/orca/scripts/agent_controller.gd":
+	var profile: Dictionary = {}
+	func _capture_provider_config() -> Dictionary:
+		return profile.duplicate(true)
+
+
 class FakeTools:
 	extends RefCounted
 	const MAX_WORK_MODE_REASON_CHARS := 240
@@ -149,6 +155,7 @@ class FakeTools:
 		var definitions := [
 			{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}},
 			{"type": "function", "function": {"name": "inspect_scene", "parameters": {"type": "object"}}},
+			{"type": "function", "function": {"name": "inspect_editor_scene", "parameters": {"type": "object"}}},
 			{"type": "function", "function": {"name": "inspect_project_settings", "parameters": {"type": "object"}}},
 			{"type": "function", "function": {"name": "observe_game_run", "parameters": {"type": "object"}}},
 			{"type": "function", "function": {"name": "verify_game_run", "parameters": {"type": "object"}}},
@@ -333,6 +340,14 @@ class FakeTools:
 		return revert_file_edit(proposal)
 
 
+class SceneTools:
+	extends FakeTools
+	func execute_tool(tool_name: String, arguments: Dictionary, game_process_service = null) -> Dictionary:
+		if tool_name == "inspect_scene":
+			return preload("res://addons/orca/scripts/tools.gd").execute_tool(tool_name, arguments, game_process_service)
+		return super.execute_tool(tool_name, arguments, game_process_service)
+
+
 class GuidanceController:
 	extends AgentController
 	var instruction_result := {"success": true, "found": true, "wrapped_content": "WRAPPED EXACT GUIDANCE"}
@@ -360,11 +375,14 @@ func _init() -> void:
 
 
 func _run() -> void:
+	await _test_connection_setup_preflight()
 	await _test_modes_and_plan_runtime_denial()
 	await _test_work_mode_escalation()
 	await _test_local_chat_tool_denial()
 	await _test_request_workflow_state()
 	await _test_request_ownership()
+	await _test_response_attribution()
+	await _test_responses_continuation()
 	await _test_support_request_metadata()
 	await _test_reentrant_request_lifecycle()
 	await _test_synchronous_tool_and_approval_boundaries()
@@ -399,9 +417,29 @@ func _run() -> void:
 	await _test_applied_change_recovery_does_not_replay()
 	await _test_incomplete_protocol_refuses_recovery()
 	await _test_context_pressure_finalization()
+	await _test_compact_scene_tool_continuation()
 	await _test_context_budget_integration()
 	await _test_plan_revert_denial()
 	_finish()
+
+
+func _test_connection_setup_preflight() -> void:
+	var fixture := await _new_controller({"provider": "openai", "base_url": "https://api.openai.com/v1", "model": "gpt-4o", "api_key": ""})
+	var controller = fixture["controller"]
+	var history: Array = controller.message_history.duplicate(true)
+	var activations := {"count": 0}
+	controller.request_state_changed.connect(func(_id: int, _active: bool): activations["count"] += 1)
+	_expect(controller.connection_setup()["status"] == "credentials", "missing provider credentials have a structured setup state")
+	_expect(not controller.submission_error().is_empty() and not controller.send_user_message("Keep my draft"), "controller rejects missing credentials before accepting a turn")
+	_expect(controller.message_history == history and not controller.is_busy() and activations["count"] == 0 and fixture["api"].requests.is_empty(), "setup denial creates no history, active turn or provider request")
+	for provider_id in ["ollama", "lmstudio", "local_openai"]:
+		controller.profile = {"provider": provider_id, "base_url": "http://127.0.0.1:18473/v1", "model": "local-fixture", "api_key": ""}
+		_expect(controller.connection_setup()["status"] == "ready" and controller.submission_error().is_empty(), "configured keyless local profile is ready: " + provider_id)
+		controller.profile["model"] = ""
+		_expect(controller.connection_setup()["status"] == "model" and not controller.send_user_message("No model"), "keyless local profile still requires a model")
+	controller.profile = {"provider": "orca_cloud", "model": "fixture"}
+	_expect(controller.connection_setup()["status"] == "account" and not controller.send_user_message("No account"), "managed profile requires an account rather than an API key")
+	await _free_controller(controller)
 
 
 func _test_modes_and_plan_runtime_denial() -> void:
@@ -532,6 +570,12 @@ func _test_local_chat_tool_denial() -> void:
 	enabled_config["agent_compatibility"] = record
 	controller._turn_provider_config = enabled_config
 	_expect(not controller._get_tool_definitions().is_empty(), "an exact passed and explicitly enabled local binding should expose normal mode tools")
+	var old_probe_config := enabled_config.duplicate(true)
+	old_probe_config["agent_compatibility"]["probe_version"] = AgentCompatibilityProbe.PROBE_VERSION - 1
+	controller._turn_provider_config = old_probe_config
+	_expect(controller._get_tool_definitions().is_empty(), "older probe passes should omit tools until refreshed-context compatibility is retested")
+	var old_probe_result: Dictionary = await controller._execute_tool_call({"id": "old_probe_read", "type": "function", "function": {"name": "read_file", "arguments": "{}"}})
+	_expect(old_probe_result.get("outcome") == "failed" and tools.execute_calls == 0 and tools.prepare_calls == 0, "older probe passes must also deny runtime execution before side effects")
 	enabled_config["model"] = "different-model"
 	controller._turn_provider_config = enabled_config
 	_expect(controller._get_tool_definitions().is_empty(), "changing the exact model should invalidate local Agent opt-in")
@@ -562,7 +606,7 @@ func _test_request_ownership() -> void:
 	var errors: Array[Dictionary] = []
 	var cancellations: Array[int] = []
 	var stream_text := [""]
-	controller.message_received.connect(func(turn_id: int, _role: String, content: String): messages.append({"turn_id": turn_id, "content": content}))
+	controller.message_received.connect(func(turn_id: int, _role: String, content: String, _attribution: Dictionary): messages.append({"turn_id": turn_id, "content": content}))
 	controller.error_occurred.connect(func(turn_id: int, message: String): errors.append({"turn_id": turn_id, "message": message}))
 	controller.request_cancelled.connect(func(turn_id: int): cancellations.append(turn_id))
 	controller.message_stream_delta.connect(func(_turn_id: int, content: String): stream_text[0] += content)
@@ -594,7 +638,7 @@ func _test_request_ownership() -> void:
 	var observed_turn_ids: Array[int] = []
 	var terminal_messages: Array[Dictionary] = []
 	controller.workflow_state_changed.connect(func(turn_id: int, _state: String, _details: Dictionary): observed_turn_ids.append(turn_id))
-	controller.message_received.connect(func(turn_id: int, _role: String, content: String): terminal_messages.append({"turn_id": turn_id, "content": content}))
+	controller.message_received.connect(func(turn_id: int, _role: String, content: String, _attribution: Dictionary): terminal_messages.append({"turn_id": turn_id, "content": content}))
 	controller.send_user_message("follow tools")
 	var tool_turn: int = controller._active_turn_id
 	var initial_request := api.current_request_id()
@@ -631,6 +675,72 @@ func _test_request_ownership() -> void:
 	var sent_request_id := int(api.requests[0].get("request_options", {}).get("lifecycle_request_id", 0))
 	_expect(sent_request_id > 0 and controller._expected_provider_request_id == 0, "synchronous failures should be owned by the ID set before APIClient is called")
 	_expect(synchronous_errors.size() == 1 and int(synchronous_errors[0].get("turn_id", 0)) > 0 and not controller.is_busy(), "an owned synchronous failure should terminate exactly its originating turn")
+	await _free_controller(controller)
+
+
+func _test_response_attribution() -> void:
+	var first_profile := {"provider": "openai", "base_url": "https://api.openai.com/v1", "model": "openai/full-model-A", "api_key": "synthetic-only"}
+	var second_profile := first_profile.duplicate(true)
+	second_profile["model"] = "full-model-B"
+	var fixture := await _new_controller(first_profile)
+	var controller = fixture["controller"]
+	var api: FakeApiClient = fixture["api"]
+	var received: Array[Dictionary] = []
+	var workflow: Array[Dictionary] = []
+	controller.message_received.connect(func(turn_id: int, _role: String, content: String, attribution: Dictionary): received.append({"turn_id": turn_id, "content": content, "attribution": attribution.duplicate(true)}))
+	controller.workflow_state_changed.connect(func(_turn: int, state: String, details: Dictionary):
+		if state in ["thinking", "finalizing"]:
+			workflow.append(details.get("attribution", {}).duplicate(true))
+	)
+	var reenter := [true]
+	controller.request_state_changed.connect(func(_turn: int, busy: bool):
+		if not busy and reenter[0]:
+			reenter[0] = false
+			controller.profile = second_profile.duplicate(true)
+			controller.set_mode(AgentController.AgentMode.PLAN)
+			controller.send_user_message("Second turn")
+	)
+	controller.send_user_message("First turn")
+	var first_request := api.current_request_id()
+	api.complete({"model": "provider-reported-alias", "choices": [{"message": {"role": "assistant", "content": "First answer"}}]})
+	_expect(received.size() == 1 and received[0]["attribution"] == {"model": first_profile["model"], "mode": AgentController.AgentMode.BUILD}, "completion must carry the generating request's configured model/mode through terminal reentry")
+	_expect(workflow.size() == 2 and workflow[0]["model"] == first_profile["model"] and workflow[1] == {"model": second_profile["model"], "mode": AgentController.AgentMode.PLAN}, "each provider request must publish its own immutable model/mode context")
+	api.request_completed.emit(first_request, {"choices": [{"message": {"content": "stale"}}]})
+	_expect(received.size() == 1 and controller._request_attribution == workflow[1], "stale terminals must not replace a newer response's attribution")
+	controller.profile = first_profile.duplicate(true)
+	api.complete({"choices": [{"message": {"role": "assistant", "content": "Second answer"}}]})
+	_expect(received.size() == 2 and received[1]["attribution"] == workflow[1], "settings changes during a turn must not relabel its completed answer")
+	for message in controller.message_history:
+		_expect(not message.has("attribution"), "attribution must remain outside model protocol history")
+	await _free_controller(controller)
+
+	fixture = await _new_controller(first_profile)
+	controller = fixture["controller"]
+	api = fixture["api"]
+	controller.set_mode(AgentController.AgentMode.PLAN)
+	var switched: Array[Dictionary] = []
+	controller.work_mode_requested.connect(func(turn_id: int, request: Dictionary): controller.call_deferred("resolve_work_mode_request", str(request["call_id"]), turn_id, true))
+	controller.message_received.connect(func(_turn: int, _role: String, _content: String, attribution: Dictionary): switched.append(attribution.duplicate(true)))
+	controller.send_user_message("Implement after planning")
+	api.complete(_tool_response([_work_mode_call("attribution_switch", "Implementation requires Work.")]))
+	for _frame in range(8):
+		if api.requests.size() == 2:
+			break
+		await process_frame
+	_expect(api.requests.size() == 2 and controller._request_attribution == {"model": first_profile["model"], "mode": AgentController.AgentMode.BUILD}, "approved Plan-to-Work must refresh attribution only for the next provider request")
+	api.complete({"choices": [{"message": {"role": "assistant", "content": "Work answer"}}]})
+	_expect(switched == [{"model": first_profile["model"], "mode": AgentController.AgentMode.BUILD}], "the final footer mode must reflect the Work request that produced it")
+	await _free_controller(controller)
+
+	fixture = await _new_controller(first_profile)
+	controller = fixture["controller"]
+	api = fixture["api"]
+	var local_reports: Array[Dictionary] = []
+	controller.message_received.connect(func(_turn: int, _role: String, _content: String, attribution: Dictionary): local_reports.append(attribution))
+	controller.send_user_message("Finalize")
+	controller._loop_final_request = true
+	api.fail({"category": "malformed_response", "message": "The provider completed without visible assistant content or a valid tool call."})
+	_expect(local_reports == [{}], "controller-generated recovery/finalization text must not be attributed to a model answer")
 	await _free_controller(controller)
 
 
@@ -968,18 +1078,22 @@ func _test_task_context_refresh() -> void:
 
 
 func _test_scene_inspection_permission() -> void:
-	var fixture := await _new_controller()
-	var controller = fixture["controller"]
-	var tools: FakeTools = fixture["tools"]
-	_expect(controller.set_mode(AgentController.AgentMode.PLAN), "scene inspection should be available from Plan mode")
-	_expect(_tool_names(controller._get_tool_definitions()).has("inspect_scene"), "Plan schema should expose inspect_scene")
-	var proposals := [0]
-	controller.edit_proposed.connect(func(_turn_id: int, _proposal: Dictionary): proposals[0] += 1)
-	var result: Dictionary = await controller._execute_tool_call({"id": "inspect_1", "type": "function", "function": {"name": "inspect_scene", "arguments": "{\"scene_path\":\"res://main.tscn\"}"}})
-	_expect(result.get("outcome") == "completed", "inspect_scene should use the generic read-only execution path")
-	_expect(tools.execute_calls == 1, "inspect_scene should execute exactly once")
-	_expect(proposals[0] == 0, "inspect_scene must never enter edit approval")
-	await _free_controller(controller)
+	for mode in [AgentController.AgentMode.PLAN, AgentController.AgentMode.BUILD]:
+		var fixture := await _new_controller()
+		var controller = fixture["controller"]
+		var tools: FakeTools = fixture["tools"]
+		controller.set_mode(mode)
+		var proposals := [0]
+		controller.edit_proposed.connect(func(_turn_id: int, _proposal: Dictionary): proposals[0] += 1)
+		for tool_name in ["inspect_scene", "inspect_editor_scene"]:
+			_expect(_tool_names(controller._get_tool_definitions()).has(tool_name), "both modes should expose " + tool_name)
+			var arguments := {"scene_path": "res://main.tscn"} if tool_name == "inspect_scene" else {"scope": "selection"}
+			var result: Dictionary = await controller._execute_tool_call({"id": "inspect_" + tool_name, "type": "function", "function": {"name": tool_name, "arguments": JSON.stringify(arguments)}})
+			_expect(result.get("outcome") == "completed", tool_name + " should use the generic read-only execution path")
+		_expect(tools.execute_calls == 2 and proposals[0] == 0, "scene reads must execute once each without approval or mutation")
+		var prompt: String = controller._get_system_prompt()
+		_expect(prompt.contains("inspect_editor_scene") and prompt.contains("not runtime evidence or a patch base"), "both prompts must distinguish live context from mutation and runtime evidence")
+		await _free_controller(controller)
 
 
 func _test_project_settings_inspection_permission() -> void:
@@ -1334,7 +1448,7 @@ func _test_long_task_run_fix_verify() -> void:
 	controller.tool_execution_completed.connect(func(_turn_id: int, call_id: String, _tool_name: String, execution: Dictionary, _duration_ms: int): completed_executions[call_id] = execution.duplicate(true))
 	controller.tasks_changed.connect(func(tasks: Array): task_emissions.append(tasks.duplicate(true)))
 	controller.workflow_state_changed.connect(func(_turn_id: int, state: String, _details: Dictionary): workflow_states.append(state))
-	controller.message_received.connect(func(_turn_id: int, _role: String, content: String): visible_messages.append(content))
+	controller.message_received.connect(func(_turn_id: int, _role: String, content: String, _attribution: Dictionary): visible_messages.append(content))
 	controller.error_occurred.connect(func(_turn_id: int, message: String): errors.append(message))
 	_expect(controller.restore_session_state(AgentController.AgentMode.BUILD, [], {}, initial_tasks), "the long-task fixture should restore its initial checklist")
 	controller.send_user_message("Fix and verify the startup failure")
@@ -1443,6 +1557,7 @@ func _test_tool_batch_barriers() -> void:
 		"read_file",
 		"search_files",
 		"inspect_scene",
+		"inspect_editor_scene",
 		"inspect_project_settings",
 		"read_project_skill",
 		"inspect_godot_api",
@@ -1616,7 +1731,7 @@ func _test_loop_guard_duplicate_denial() -> void:
 	_expect(controller._loop_final_request and controller._loop_notice_message_index >= 0, "duplicate detection should append one tracked request-scoped loop notice")
 	_expect(controller._loop_final_trigger_reason == "identical_call_result", "duplicate detection should preserve its exact trigger reason")
 	var visible_messages := []
-	controller.message_received.connect(func(_turn_id: int, _role: String, content: String): visible_messages.append(content))
+	controller.message_received.connect(func(_turn_id: int, _role: String, content: String, _attribution: Dictionary): visible_messages.append(content))
 	var denied_response := _tool_response([
 		{"id": "denied_a", "type": "function", "function": {"name": "read_file", "arguments": "{}"}},
 		{"id": "denied_b", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
@@ -1662,7 +1777,7 @@ func _test_loop_guard_empty_final_response() -> void:
 	var states: Array[Dictionary] = []
 	var visible_messages := []
 	controller.workflow_state_changed.connect(func(_turn_id: int, state: String, details: Dictionary): states.append({"state": state, "details": details.duplicate(true)}))
-	controller.message_received.connect(func(_turn_id: int, _role: String, content: String): visible_messages.append(content))
+	controller.message_received.connect(func(_turn_id: int, _role: String, content: String, _attribution: Dictionary): visible_messages.append(content))
 	controller._is_running = true
 	controller._reset_turn_loop_state()
 	for index in range(3):
@@ -1679,7 +1794,7 @@ func _test_loop_guard_empty_final_response() -> void:
 	fixture = await _new_controller()
 	controller = fixture["controller"]
 	visible_messages = []
-	controller.message_received.connect(func(_turn_id: int, _role: String, content: String): visible_messages.append(content))
+	controller.message_received.connect(func(_turn_id: int, _role: String, content: String, _attribution: Dictionary): visible_messages.append(content))
 	controller._is_running = true
 	controller._reset_turn_loop_state()
 	controller._begin_loop_finalization(ToolLoopGuard.REASON_NO_PROGRESS)
@@ -1735,7 +1850,7 @@ func _test_tool_round_cap_finalization() -> void:
 	var errors := []
 	var visible_messages := []
 	controller.error_occurred.connect(func(_turn_id: int, message: String): errors.append(message))
-	controller.message_received.connect(func(_turn_id: int, _role: String, content: String): visible_messages.append(content))
+	controller.message_received.connect(func(_turn_id: int, _role: String, content: String, _attribution: Dictionary): visible_messages.append(content))
 	controller._is_running = true
 	controller._reset_turn_loop_state()
 	game.active = true
@@ -1883,6 +1998,7 @@ func _test_context_pressure_finalization() -> void:
 	controller._reset_turn_loop_state()
 	controller._turn_tool_receipts.append({"name": "read_file", "outcome": "completed"})
 	controller._run_attempts = 1
+	controller._latest_context_tokens = 4088
 	game.active = true
 	game.run_id = 9
 	game.snapshot["run_id"] = 9
@@ -1896,6 +2012,10 @@ func _test_context_pressure_finalization() -> void:
 	_expect(rendered_error.contains(AgentController.RECOVERY_CHECKPOINT_HEADING) and rendered_error.contains("[completed] \"Inspect failure\"") and rendered_error.contains("controller_owned_run_cleanup: completed"), "the visible local checkpoint should contain bounded receipts, tasks, and normalized cleanup state")
 	_expect(not serialized.contains("pressure_too_large") and not serialized.contains("private-result") and not serialized.contains("tool_calls") and not serialized.contains("\"role\":\"tool\""), "local pressure recovery must collapse call IDs, raw results, and replayable protocol")
 	_expect(controller.snapshot_session_state().get("tasks") == controller._tasks and controller.support_request_metadata().get("failure_category") == "context_budget", "local pressure recovery should preserve tasks separately and report a local budget failure")
+	var budget_summary: Dictionary = controller._session_usage_summary()
+	_expect(budget_summary.get("context_tokens") == 4088 and budget_summary.get("request_budget", {}).get("status") == "blocked", "local budget failure must retain reported usage separately from the failed request estimate")
+	_expect(budget_summary.get("request_budget", {}).get("estimated_tokens", 0) > budget_summary.get("request_budget", {}).get("input_budget", 0) and not budget_summary.get("request_budget", {}).get("active", true), "blocked estimates must describe the actual unsent request after checkpointing")
+	_expect(rendered_error.contains("Request estimate:") and not controller.snapshot_session_state().get("usage", {}).has("request_budget"), "budget details must explain the failure without persisting request-scoped estimates")
 	ModelMetadata.set_runtime_metadata("openai", "orca-pressure-local-test", {"context_window": 32768})
 	controller.send_user_message("Continue the unfinished work after re-inspection")
 	_expect(api.requests.size() == 1 and not JSON.stringify(api.requests[0].get("messages", [])).contains("pressure_too_large"), "a later explicit request should retain the checkpoint without replaying prior tools")
@@ -1921,6 +2041,40 @@ func _test_applied_change_recovery_does_not_replay() -> void:
 	_expect(tools.apply_calls == 1, "building a recovery checkpoint must never replay an applied change")
 	var serialized := JSON.stringify(controller.message_history)
 	_expect(serialized.contains("apply_patch: applied") and not serialized.contains("new-hash") and not serialized.contains("new\\n"), "applied-change recovery should retain only a bounded outcome without proposal data")
+	await _free_controller(controller)
+
+
+func _test_compact_scene_tool_continuation() -> void:
+	var fixture := await _new_controller()
+	var controller = fixture["controller"]
+	var api: FakeApiClient = fixture["api"]
+	controller.tools_script = SceneTools.new()
+	var activity := []
+	controller.tool_execution_completed.connect(func(_turn, _call, _name, execution, _duration): activity.append(execution.duplicate(true)))
+	controller.message_history = [{"role": "system", "content": "system"}, {"role": "user", "content": "Locate the saved fixture node"}]
+	controller._is_running = true
+	await _deliver_completion(controller, _tool_response([_simple_tool_call("json_scene_limits", "inspect_scene", {"scene_path": "res://tests/fixtures/inspect_scene_fixture.tscn", "max_nodes": 2, "max_properties_per_node": 1})]))
+	_expect(activity.size() == 1 and activity[0].get("success", false), "actual JSON tool-call numbers must inspect the saved fixture successfully")
+	var tool_message: Dictionary = controller.message_history[-1]
+	_expect(tool_message.get("role") == "tool" and tool_message.get("tool_call_id") == "json_scene_limits", "compact scene data must retain its exact matching call result")
+	if activity.size() == 1 and activity[0].get("success", false):
+		var compact := str(tool_message.get("content", ""))
+		var pretty := str(activity[0].get("content", ""))
+		_expect(compact.length() < pretty.length() and JSON.parse_string(compact) == JSON.parse_string(pretty), "model continuation must preserve every scene value while the activity card retains readable formatting")
+	_expect(api.requests.size() == 1 and _protocol_is_valid(api.requests[0].get("messages", [])), "successful numeric scene inspection must issue exactly one protocol-valid continuation")
+	_expect(controller._session_usage_summary().get("request_budget", {}).get("active", false), "request estimates must be available during continuation")
+	controller.cancel_current_request()
+	_expect(not controller._session_usage_summary().get("request_budget", {}).get("active", true), "Stop must clear the active request-estimate state")
+	await _free_controller(controller)
+	fixture = await _new_controller()
+	controller = fixture["controller"]
+	api = fixture["api"]
+	controller._is_running = true
+	_owned_request_id(controller)
+	controller.session_usage_changed.connect(func(summary):
+		if summary.get("request_budget", {}).get("active", false):
+			controller.cancel_current_request())
+	_expect(not controller._send_current_request() and api.requests.is_empty(), "cancellation from a new request-budget signal must prevent transport and retain turn ownership checks")
 	await _free_controller(controller)
 
 
@@ -1978,8 +2132,45 @@ func _deliver_failure(controller, error: Dictionary) -> void:
 	controller._on_api_request_failed(_owned_request_id(controller), error)
 
 
-func _new_controller() -> Dictionary:
-	var controller = AgentController.new()
+func _test_responses_continuation() -> void:
+	var protocol = preload("res://addons/orca/scripts/responses_protocol.gd")
+	var profile := {"provider": "azure", "base_url": "http://127.0.0.1:18473/foundry", "model": "gpt-6.1-sol", "api_key": "synthetic-responses-key", "api_mode": "responses", "reasoning_effort": "high"}
+	var binding: Dictionary = AgentCompatibilityProbe.create_binding(profile)["binding"]
+	binding["enabled"] = true
+	profile["agent_compatibility"] = binding
+	for outcome in ["completed", "failed", "cancelled"]:
+		var fixture := await _new_controller(profile)
+		var controller = fixture["controller"]
+		var api: FakeApiClient = fixture["api"]
+		controller.set_mode(AgentController.AgentMode.PLAN)
+		controller.send_user_message("Synthetic Responses read")
+		var reply := {"status": "completed", "model": "gpt-6.1-sol", "output": [{"id": "rs", "type": "reasoning", "encrypted_content": "opaque-continuation"}, {"id": "fc", "type": "function_call", "call_id": "responses-read", "name": "read_file", "arguments": "{}"}]}
+		api.complete(protocol.completion(reply, profile)["response"])
+		await process_frame
+		_expect(api.requests.size() == 2 and JSON.stringify(api.requests[-1]["messages"]).contains("opaque-continuation"), "controller must retain bounded opaque state during the active tool turn")
+		controller.profile["api_mode"] = "chat_completions"
+		_expect(api.requests[-1]["provider_config"].get("api_mode") == "responses", "active follow-ups must remain bound to the initial transport")
+		if outcome == "completed":
+			api.complete({"choices": [{"message": {"content": "done"}}]})
+		elif outcome == "failed":
+			api.fail({"message": "synthetic response failure", "category": "connection"})
+		else:
+			controller.cancel_current_request()
+		_expect(not JSON.stringify(controller.message_history).contains("opaque-continuation"), "ending " + outcome + " must remove opaque continuation before persistence or a new turn")
+		_expect(fixture["tools"].execute_calls == 1 and fixture["tools"].prepare_calls == 0, "Responses Plan continuation must retain read-only execution boundaries")
+		await _free_controller(controller)
+	var denied := profile.duplicate(true)
+	denied["api_mode"] = "chat_completions"
+	var fixture := await _new_controller(denied)
+	fixture["controller"].send_user_message("changed protocol")
+	_expect(fixture["api"].requests[0]["tools"].is_empty(), "a Responses pass must not expose tools after a protocol change")
+	fixture["controller"].cancel_current_request()
+	await _free_controller(fixture["controller"])
+
+
+func _new_controller(profile: Dictionary = {}) -> Dictionary:
+	var controller := ProfileController.new()
+	controller.profile = profile.duplicate(true) if not profile.is_empty() else {"provider": "openai", "base_url": "https://api.openai.com/v1", "model": "gpt-4o", "api_key": "synthetic-test-key"}
 	get_root().add_child(controller)
 	await process_frame
 	var fake_api := FakeApiClient.new()

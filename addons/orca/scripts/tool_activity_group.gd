@@ -79,7 +79,7 @@ func add_tool(call_id: String, tool_name: String, arguments: Dictionary):
 	card.help_requested.connect(func(topic: String): help_requested.emit(topic))
 	_cards[call_id] = card
 	_tool_names[call_id] = tool_name
-	_targets[call_id] = _target_from_arguments(arguments)
+	_targets[call_id] = card._target_from_arguments(arguments) if tool_name == "inspect_editor_scene" else _target_from_arguments(arguments)
 	_outcomes[call_id] = "running"
 	_durations[call_id] = 0
 	_update_header()
@@ -182,6 +182,8 @@ func _group_title() -> String:
 				title = "Search project"
 			"inspect_scene":
 				title = "Inspect scene" if count == 1 else "Inspect scenes"
+			"inspect_editor_scene":
+				title = "Inspect live scene"
 			"inspect_project_settings":
 				title = "Inspect project settings"
 			"read_project_skill":

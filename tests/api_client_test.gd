@@ -8,6 +8,7 @@ var _failures := PackedStringArray()
 func _init() -> void:
 	_test_media_types()
 	_test_fragmented_sse_and_eof_flush()
+	_test_stream_cancellation_reentry()
 	_test_streamed_tool_metadata()
 	_test_structured_error_metadata()
 	_test_provider_error_formatting()
@@ -47,6 +48,20 @@ func _test_fragmented_sse_and_eof_flush() -> void:
 	_expect("".join(deltas) == "Hello", "fragmented SSE content should be reconstructed")
 	_expect(client._stream_done, "an unterminated final DONE event should complete at clean EOF")
 	_expect(client._raw_response.is_empty(), "SSE parsing should not retain a raw response copy")
+	client.free()
+
+
+func _test_stream_cancellation_reentry() -> void:
+	var client := ApiClient.new()
+	client._is_requesting = true
+	client._request_serial = 9
+	client.stream_delta.connect(func(_id: int, _text: String):
+		client.cancel_request()
+		# Represent a new request started synchronously by the ending-turn UI.
+		client._request_serial += 1
+		client._line_buffer = "new-request-buffer".to_utf8_buffer())
+	client._consume_sse_bytes("data: {\"choices\":[{\"delta\":{\"content\":\"old\",\"reasoning_content\":\"stale-private\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_utf8_buffer())
+	_expect(client._line_buffer.get_string_from_utf8() == "new-request-buffer" and client._reasoning_content.is_empty() and not client._stream_done, "old buffered events must not modify a synchronously reentered request after Stop")
 	client.free()
 
 

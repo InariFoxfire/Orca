@@ -307,6 +307,7 @@ theme_override_font_sizes/font_size = 13
 theme_override_styles/normal = SubResource("StyleBoxInput")
 theme_override_styles/focus = SubResource("StyleBoxInput")
 placeholder_text = "Describe what you want to build or fix..."
+deselect_on_focus_loss_enabled = false
 wrap_mode = 1
 
 [node name="ComposerActions" type="HBoxContainer" parent="MarginContainer/VBoxContainer/Composer/ComposerContent"]

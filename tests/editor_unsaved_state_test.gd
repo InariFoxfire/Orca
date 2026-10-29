@@ -4,6 +4,7 @@ const EditorContext = preload("res://addons/orca/scripts/editor_context.gd")
 const GameProcessService = preload("res://addons/orca/scripts/game_process_service.gd")
 const SceneProposal = preload("res://addons/orca/scripts/scene_proposal.gd")
 const Tools = preload("res://addons/orca/scripts/tools.gd")
+const ScriptReferences = preload("res://addons/orca/scripts/script_references.gd")
 
 const WAIT_TIMEOUT_MS := 5000
 
@@ -67,11 +68,17 @@ func _test_dirty_script() -> void:
 	_expect(function_result.get("success", false), "focused function reading should accept exact unsaved editor source")
 	_expect(function_result.get("data", {}).get("source_kind") == "editor", "focused function reading should identify editor provenance")
 	_expect(not function_result.get("data", {}).has("disk_sha256"), "unsaved editor source must not expose a disk patch-base hash")
+	var reference := ScriptReferences.prepare([_script_path])
+	_expect(reference.get("success", false) and reference["references"][0]["content"] == unsaved_source and reference["references"][0]["source_kind"] == "editor", "explicit references must use exact active unsaved source without changing disk")
+	_expect(ScriptReferences.editor_drag_path(EditorInterface.get_script_editor().get_current_editor()) == _script_path, "script-list drags must resolve through exact public current-editor identity")
+	_expect(ScriptReferences.editor_drag_path(code_edit).is_empty(), "arbitrary editor descendant controls must never be accepted as script drags")
+	_expect(_read(_script_path) == original and EditorContext.has_unsaved_file(_script_path), "referencing unsaved scripts must preserve disk and dirty state")
 	var other_script := ResourceLoader.load(_other_script_path, "Script", ResourceLoader.CACHE_MODE_REPLACE) as Script
 	EditorInterface.edit_script(other_script, 1, 1, true)
 	_expect(await _wait_until(func(): return _current_script_path() == _other_script_path), "a second script should become active")
 	var inactive_result := Tools.execute_tool("read_gdscript_function", {"filepath": _script_path, "function_name": "saved_function"})
 	_expect(not inactive_result.get("success", true) and str(inactive_result.get("content", "")).contains("not the active script"), "a dirty non-current script must not fall back to stale disk source")
+	_expect(not ScriptReferences.prepare([_script_path]).get("success", true), "inactive dirty references must reject stale disk fallback and preserve the draft for activation/save")
 	EditorInterface.edit_script(script, 1, 1, true)
 	_expect(await _wait_until(func(): return _current_script_path() == _script_path), "the dirty fixture should become active again")
 	_expect(not Tools.prepare_file_patch("blocked", _script_path, original.sha256_text(), [{"start_line": 1, "end_line": 1, "replacement": "extends RefCounted"}]).get("success", true), "patch preparation should reject a dirty script")

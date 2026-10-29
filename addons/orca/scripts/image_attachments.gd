@@ -11,6 +11,7 @@ const MAX_SESSION_IMAGES := 32
 const MAX_SESSION_IMAGE_BYTES := 8 * 1024 * 1024
 const MAX_REQUEST_BYTES := 16 * 1024 * 1024
 const PNG_PREFIX := "data:image/png;base64,"
+const HISTORY_IMAGE_PLACEHOLDER := "[Earlier attachment: %d image(s). Image pixels are unavailable to this model. Use any earlier text descriptions; do not claim direct image inspection.]"
 
 
 static func prepare_file(path: String) -> Dictionary:
@@ -110,8 +111,44 @@ static func texture(record: Dictionary) -> Texture2D:
 	return ImageTexture.create_from_image(image)
 
 
-static func request_messages(messages: Array) -> Array:
+static func latest_user_index(messages: Array) -> int:
+	for index in range(messages.size() - 1, -1, -1):
+		if typeof(messages[index]) == TYPE_DICTIONARY and messages[index].get("role") == "user":
+			return index
+	return -1
+
+
+static func has_images(messages: Array) -> bool:
+	for message in messages:
+		if typeof(message) == TYPE_DICTIONARY and typeof(message.get("images")) == TYPE_ARRAY and not message["images"].is_empty():
+			return true
+	return false
+
+
+static func project_messages(messages: Array, include_history_images: bool = true) -> Array:
+	# Keep canonical history and its immutable image records intact. Only prior
+	# user turns may be projected; current attachments must never be discarded.
 	var result := messages.duplicate(true)
+	if include_history_images:
+		return result
+	var current_user := latest_user_index(result)
+	for index in range(maxi(0, current_user)):
+		var message = result[index]
+		if typeof(message) != TYPE_DICTIONARY or message.get("role") != "user" or typeof(message.get("images")) != TYPE_ARRAY or message["images"].is_empty():
+			continue
+		if typeof(message.get("content")) != TYPE_STRING:
+			# Malformed image messages remain available for transport validation;
+			# never stringify multimodal content/base64 into a text placeholder.
+			continue
+		var placeholder := HISTORY_IMAGE_PLACEHOLDER % message["images"].size()
+		var text: String = message["content"]
+		message["content"] = text + ("\n\n" if not text.is_empty() else "") + placeholder
+		message.erase("images")
+	return result
+
+
+static func request_messages(messages: Array, include_history_images: bool = true) -> Array:
+	var result := project_messages(messages, include_history_images)
 	for message in result:
 		if typeof(message) != TYPE_DICTIONARY:
 			continue

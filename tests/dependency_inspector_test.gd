@@ -85,6 +85,7 @@ func _test_rejections() -> void:
 		{"filepath": ROOT, "direction": "forward", "max_depth": 1, "max_results": 10, "extra": true},
 		{"filepath": "/tmp/outside.tres", "direction": "forward", "max_depth": 1, "max_results": 10},
 		{"filepath": "res://addons/orca/plugin.cfg", "direction": "forward", "max_depth": 1, "max_results": 10},
+		{"filepath": "res://.orca-update/backup/plugin.cfg", "direction": "forward", "max_depth": 1, "max_results": 10},
 		{"filepath": "res://tests/fixtures/missing.tres", "direction": "forward", "max_depth": 1, "max_results": 10}
 	]:
 		_expect(not DependencyInspector.inspect(arguments).get("success", true), "invalid dependency inspector arguments or paths should fail")

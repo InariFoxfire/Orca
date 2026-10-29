@@ -2,8 +2,10 @@
 extends Node
 const ImageAttachments = preload("res://addons/orca/scripts/image_attachments.gd")
 const ImageCapability = preload("res://addons/orca/scripts/image_capability.gd")
+const ResponseAttribution = preload("res://addons/orca/scripts/response_attribution.gd")
+const ScriptReferences = preload("res://addons/orca/scripts/script_references.gd")
 
-signal message_received(turn_id: int, role: String, content: String)
+signal message_received(turn_id: int, role: String, content: String, attribution: Dictionary)
 signal error_occurred(turn_id: int, message: String)
 signal tool_execution_started(turn_id: int, call_id: String, tool_name: String, arguments: Dictionary)
 signal tool_execution_completed(turn_id: int, call_id: String, tool_name: String, execution: Dictionary, duration_ms: int)
@@ -44,6 +46,7 @@ const BATCHABLE_READ_ONLY_TOOLS := {
 	"read_file": true,
 	"search_files": true,
 	"inspect_scene": true,
+	"inspect_editor_scene": true,
 	"inspect_project_settings": true,
 	"read_project_skill": true,
 	"inspect_godot_api": true,
@@ -82,6 +85,7 @@ enum AgentMode {
 }
 
 var api_client
+var account_service
 var tools_script
 var game_process_service
 var message_history: Array = []
@@ -105,6 +109,7 @@ var _session_input_tokens := 0
 var _session_output_tokens := 0
 var _session_cached_tokens := 0
 var _latest_context_tokens := 0
+var _last_request_budget: Dictionary = {}
 var _session_cost_usd := 0.0
 var _usage_complete := true
 var _cost_complete := true
@@ -120,6 +125,8 @@ var _restored_cost_available := true
 var _restored_cost_estimated := false
 var _restored_context_limit := 0
 var _turn_provider_config: Dictionary = {}
+var _turn_include_history_images := true
+var _request_attribution: Dictionary = {}
 var _tasks: Array[Dictionary] = []
 var _tool_loop_guard
 var _tool_progress_epoch := 0
@@ -177,11 +184,15 @@ func _connect_api_client(client) -> void:
 	client.request_cancelled.connect(_on_api_request_cancelled)
 	client.stream_started.connect(_on_stream_started)
 	client.stream_delta.connect(_on_stream_delta)
+	if client.has_signal("cloud_metadata_received"):
+		client.cloud_metadata_received.connect(_on_cloud_metadata)
 
 
 func _disconnect_api_client(client) -> void:
 	if client == null:
 		return
+	if client.has_signal("cloud_metadata_received") and client.cloud_metadata_received.is_connected(_on_cloud_metadata):
+		client.cloud_metadata_received.disconnect(_on_cloud_metadata)
 	for connection in [
 		[client.request_completed, _on_api_request_completed],
 		[client.request_failed, _on_api_request_failed],
@@ -193,32 +204,93 @@ func _disconnect_api_client(client) -> void:
 			connection[0].disconnect(connection[1])
 
 func _init_system_prompt() -> void:
+	_turn_include_history_images = true
+	_request_attribution.clear()
 	message_history = []
 	message_history.append({
 		"role": "system",
 		"content": _get_system_prompt()
 	})
 
-func submission_error(images: Array = []) -> String:
+func submission_error(images: Array = [], references: Array = []) -> String:
+	var error := ScriptReferences.validate_references(references)
+	return error if not error.is_empty() else _submission_error_for_profile(images, _capture_provider_config())
+
+
+func connection_setup() -> Dictionary:
+	return _connection_setup_for_profile(_capture_provider_config())
+
+
+func has_configured_connection() -> bool:
+	# Local preferences/catalog state only. This is onboarding, not a network or
+	# capability check, and never grants tool permission or exposes credentials.
+	if account_service != null and account_service.connected():
+		return true
+	for provider_id in ProviderRegistry.PROVIDER_IDS:
+		if provider_id == "orca_cloud":
+			continue
+		var profile := Config.get_provider_config(provider_id)
+		var definition: Dictionary = ProviderRegistry.get_provider(provider_id).definition()
+		if not str(profile.get("model", "")).strip_edges().is_empty() and (bool(definition.get("auth_optional", false)) or not str(profile.get("api_key", "")).strip_edges().is_empty()):
+			return true
+	return false
+
+
+func _connection_setup_for_profile(profile: Dictionary) -> Dictionary:
+	var provider_id := str(profile.get("provider", "openai"))
+	var status := "ready"
+	var message := ""
+	if provider_id == "orca_cloud":
+		if account_service == null or not account_service.connected():
+			status = "account"
+			message = "Sign in to Orca or connect your own provider. Your draft is ready when you are."
+		elif str(profile.get("model", "")).strip_edges().is_empty() or not profile.get("hosted_allowed", false) or not profile.get("hosted_available", false):
+			status = "model"
+			message = "Choose an available model included in your Orca account. Your draft has been kept."
+	else:
+		var definition: Dictionary = ProviderRegistry.get_provider(provider_id).definition()
+		if not bool(definition.get("auth_optional", false)) and str(profile.get("api_key", "")).strip_edges().is_empty():
+			status = "credentials"
+			message = "Sign in to Orca or connect your own provider. Your draft is ready when you are."
+		elif str(profile.get("model", "")).strip_edges().is_empty():
+			status = "model"
+			message = "Choose a model in Provider Settings. Your draft has been kept."
+	if status in ["account", "credentials"] and account_service != null and account_service.state == "restoring":
+		status = "restoring"
+		message = "Restoring your Orca connection… Your draft has been kept."
+	return {"status": status, "message": message}
+
+
+func _capture_provider_config() -> Dictionary:
+	if Config.get_provider() == "orca_cloud" and account_service != null:
+		return account_service.profile_config(Config.get_model(), Config.get_reasoning_effort())
+	return Config.get_active_provider_config()
+
+
+func _submission_error_for_profile(images: Array, provider_config: Dictionary) -> String:
 	if _is_running:
 		return "A request is already running."
+	var setup := _connection_setup_for_profile(provider_config)
+	if setup["status"] != "ready":
+		return setup["message"]
+	if provider_config.get("provider") == "orca_cloud":
+		if provider_config.get("hosted_context_policy", {}).get("version") != "utf8-conservative-v2":
+			return "Orca Cloud needs the managed-model protocol update. Reload the backend API and refresh Models; no Agent-tool setup is required."
 	var error := ImageAttachments.validate_images(images)
 	if not error.is_empty():
 		return error
-	var has_images := not images.is_empty()
-	for message in message_history:
-		if not message.get("images", []).is_empty():
-			has_images = true
-	if has_images and ImageCapability.resolve(Config.get_active_provider_config()) != "supported":
-		return "This conversation contains images. Choose a vision-capable model, or configure unconfirmed image support in Provider settings."
+	if not images.is_empty() and ImageCapability.resolve(provider_config) != "supported":
+		return "New image attachments require confirmed image support. Remove the draft images or choose a vision-capable model. Your draft has been kept."
 	return ""
 
 
-func send_user_message(text: String, images: Array = []) -> bool:
+func send_user_message(text: String, images: Array = [], references: Array = []) -> bool:
 	if _is_running:
 		return false
-	if not submission_error(images).is_empty():
+	var provider_config := _capture_provider_config()
+	if not ScriptReferences.validate_references(references).is_empty() or not _submission_error_for_profile(images, provider_config).is_empty():
 		return false
+	var include_history_images := ImageCapability.resolve(provider_config) == "supported"
 	_is_running = true
 	_turn_id_serial += 1
 	_active_turn_id = _turn_id_serial
@@ -234,7 +306,9 @@ func send_user_message(text: String, images: Array = []) -> bool:
 	_clear_work_mode_request_state()
 	_work_mode_requested_this_turn = false
 	_reset_tool_batch_regeneration_state()
-	_turn_provider_config = Config.get_active_provider_config()
+	_turn_provider_config = provider_config.duplicate(true)
+	_turn_include_history_images = include_history_images
+	_request_attribution.clear()
 	var turn_id := _active_turn_id
 	request_state_changed.emit(turn_id, true)
 	if not _owns_turn(turn_id):
@@ -246,13 +320,15 @@ func send_user_message(text: String, images: Array = []) -> bool:
 	})
 	if not images.is_empty():
 		message_history.back()["images"] = images.duplicate(true)
+	if not references.is_empty():
+		message_history.back()["script_references"] = ScriptReferences.sanitize_references(references)
 	_send_current_request()
 	return true
 
 func _add_turn_context() -> void:
 	var sections := PackedStringArray()
 	if not _turn_allows_tools():
-		sections.append("LOCAL CHAT MODE: Project tools are disabled for this provider until this exact endpoint and model pass Orca's future Agent compatibility flow. Answer conversationally and do not request or claim tool actions.")
+		sections.append("CHAT MODE: This hosted profile does not currently provide project tools. Answer conversationally and do not request or claim tool actions." if _turn_provider_config.get("provider") == "orca_cloud" else "CHAT MODE: Project tools are disabled until this exact profile passes Orca's Agent compatibility check and the user enables tools. Answer conversationally and do not request or claim tool actions.")
 	var instruction_result := _load_project_instructions()
 	if bool(instruction_result.get("success", false)):
 		if bool(instruction_result.get("found", false)) and not str(instruction_result.get("wrapped_content", "")).is_empty():
@@ -374,10 +450,12 @@ func snapshot_session_state() -> Dictionary:
 			continuation.append({"role": role, "content": content})
 			if role == "user" and not message.get("images", []).is_empty():
 				continuation.back()["images"] = message["images"].duplicate(true)
+			if role == "user" and not message.get("script_references", []).is_empty():
+				continuation.back()["script_references"] = ScriptReferences.sanitize_references(message["script_references"])
 	return {
 		"mode": _mode,
 		"continuation": continuation,
-		"usage": _session_usage_summary(_last_usage_model),
+		"usage": _session_usage_summary(_last_usage_model, false),
 		"tasks": _tasks.duplicate(true)
 	}
 
@@ -553,6 +631,7 @@ func _on_api_request_completed(request_id: int, response: Dictionary) -> void:
 	_set_support_request_outcome("completed")
 	_expected_provider_request_id = 0
 	var turn_id := _active_turn_id
+	var attribution := _request_attribution.duplicate(true)
 	if response.has("choices") and typeof(response.get("choices")) == TYPE_ARRAY and response.choices.size() > 0 and typeof(response.choices[0]) == TYPE_DICTIONARY and typeof(response.choices[0].get("message")) == TYPE_DICTIONARY:
 		var choice = response.choices[0]
 		var message = choice.message
@@ -562,7 +641,7 @@ func _on_api_request_completed(request_id: int, response: Dictionary) -> void:
 			"role": "assistant",
 			"content": message.get("content", "") if message.get("content") != null else ""
 		}
-		for continuation_field in ["reasoning_content", "reasoning", "reasoning_details"]:
+		for continuation_field in ["reasoning_content", "reasoning", "reasoning_details", "_orca_responses"]:
 			if message.has(continuation_field):
 				assistant_message[continuation_field] = message[continuation_field]
 		
@@ -647,6 +726,7 @@ func _on_api_request_completed(request_id: int, response: Dictionary) -> void:
 			if _loop_final_request:
 				if not _has_meaningful_content(str(assistant_message.get("content", ""))):
 					assistant_message["content"] = _empty_finalization_fallback()
+					attribution.clear()
 				else:
 					assistant_message["content"] = str(assistant_message.get("content", "")).strip_edges()
 					if not _loop_cleanup_summary.is_empty():
@@ -660,7 +740,7 @@ func _on_api_request_completed(request_id: int, response: Dictionary) -> void:
 			_reset_turn_recovery_state()
 			_set_running(false, turn_id)
 			workflow_state_changed.emit(turn_id, "idle", {})
-			message_received.emit(turn_id, "assistant", content)
+			message_received.emit(turn_id, "assistant", content, attribution)
 	else:
 		_set_support_request_failure({"category": "malformed_response", "phase": "receiving_response"})
 		turn_id = _invalidate_turn_ownership()
@@ -826,7 +906,7 @@ func _execute_tool_call(tool_call: Dictionary, expected_turn_id: int = -1, permi
 			_executing_tool_call = false
 			return _cancelled_tool_result(call_id, function_name, arguments)
 		execution = tools_script.execute_tool(function_name, arguments, game_process_service)
-		result = execution.get("content", "Error: Tool execution returned no result.")
+		result = execution.get("model_content", execution.get("content", "Error: Tool execution returned no result."))
 		outcome = execution.get("outcome", "failed")
 		if function_name in ["run_current_scene", "run_main_scene"] and execution.get("success", false):
 			_run_attempts += 1
@@ -849,7 +929,8 @@ func _execute_tool_call(tool_call: Dictionary, expected_turn_id: int = -1, permi
 		execution = {"success": outcome in ["completed", "applied", "applied_recovery"], "content": result, "outcome": outcome, "data": {}}
 	else:
 		execution["success"] = outcome in ["completed", "applied", "applied_recovery"]
-		execution["content"] = result
+		if not execution.has("content"):
+			execution["content"] = result
 		execution["outcome"] = outcome
 	_executing_tool_call = false
 	if expected_turn_id < 0 or _owns_turn(expected_turn_id):
@@ -1179,7 +1260,7 @@ func _finish_denied_loop_calls(assistant_message: Dictionary, tool_calls: Array,
 	_reset_turn_recovery_state()
 	_set_running(false, turn_id)
 	workflow_state_changed.emit(turn_id, "idle", {})
-	message_received.emit(turn_id, "assistant", final_content)
+	message_received.emit(turn_id, "assistant", final_content, {})
 
 
 func _empty_finalization_fallback() -> String:
@@ -1238,7 +1319,7 @@ func _on_api_request_failed(request_id: int, error: Dictionary) -> void:
 		_reset_turn_recovery_state()
 		_set_running(false, turn_id)
 		workflow_state_changed.emit(turn_id, "idle", {})
-		message_received.emit(turn_id, "assistant", final_content)
+		message_received.emit(turn_id, "assistant", final_content, {})
 		return
 	var user_message := error_message
 	if bool(error.get("partial_response", false)):
@@ -1284,7 +1365,17 @@ func _set_running(value: bool, turn_id: int = -1) -> void:
 		return
 	_is_running = value
 	if not value:
+		var hosted_turn: bool = _turn_provider_config.get("provider") == "orca_cloud"
+		for message in message_history:
+			if typeof(message) == TYPE_DICTIONARY:
+				message.erase("_orca_responses")
+				if _turn_provider_config.get("provider") == "orca_cloud":
+					message.erase("reasoning_content")
 		_turn_provider_config.clear()
+		_turn_include_history_images = true
+		if hosted_turn and is_instance_valid(account_service):
+			account_service.call_deferred("refresh_account")
+		_emit_session_usage(_last_usage_model)
 	request_state_changed.emit(_active_turn_id if turn_id < 0 else turn_id, value)
 
 
@@ -1296,15 +1387,32 @@ func _send_current_request() -> bool:
 	var effective_model := _last_usage_model if _tool_rounds > 0 and not _last_usage_model.is_empty() else model
 	var metadata := ModelMetadata.resolve(effective_model, api_url, model)
 	var context_window := int(metadata.get("context_window", 0))
-	var prepared := ContextBudget.prepare(message_history, definitions, context_window)
+	var hosted_output := 0
+	if _turn_provider_config.get("provider") == "orca_cloud":
+		context_window = int(_turn_provider_config.get("hosted_context_window", 0))
+		hosted_output = int(_turn_provider_config.get("hosted_output_tokens", 8192))
+	var policy: Dictionary = _turn_provider_config.get("hosted_context_policy", {})
+	var prepared := ContextBudget.prepare(message_history, definitions, context_window, _turn_include_history_images, hosted_output, policy)
 	if not prepared.get("success", false) and _can_finalize_for_context_pressure(definitions):
 		if _enter_loop_finalization(LOOP_TRIGGER_CONTEXT_PRESSURE):
 			definitions = []
 			_begin_support_request_snapshot(false)
-			prepared = ContextBudget.prepare(message_history, definitions, context_window)
+			prepared = ContextBudget.prepare(message_history, definitions, context_window, _turn_include_history_images, hosted_output, policy)
+	var budget_turn_id := _active_turn_id
+	_last_request_budget = {
+		"estimated_tokens": int(prepared.get("estimated_tokens", 0)),
+		"context_limit": context_window,
+		"input_budget": int(prepared.get("input_budget", 0)),
+		"output_reserve": int(prepared.get("final_reserve", 0)),
+		"tool_reserve": int(prepared.get("tool_reserve", 0)),
+		"status": "prepared" if prepared.get("success", false) else "blocked"
+	}
+	_emit_session_usage(_last_usage_model)
+	if not _owns_turn(budget_turn_id):
+		return false
 	if not prepared.get("success", false):
 		_set_support_request_failure({"category": "context_budget", "phase": "local"}, "blocked_locally")
-		_finish_request_error("Orca could not send the request safely: " + str(prepared.get("error", "The context budget was exceeded.")))
+		_finish_request_error("Orca could not send the request safely: " + str(prepared.get("error", "The context budget was exceeded.")) + "\n\nRequest estimate: %d tokens; safe input budget: %d of %d, with %d output and %d tool-result tokens reserved." % [_last_request_budget["estimated_tokens"], _last_request_budget["input_budget"], context_window, _last_request_budget["output_reserve"], _last_request_budget["tool_reserve"]])
 		return false
 	if prepared.get("compacted", false):
 		_remap_context_indices(int(prepared.get("removed_start", -1)), int(prepared.get("removed_count", 0)), int(prepared.get("inserted_count", 0)))
@@ -1313,17 +1421,42 @@ func _send_current_request() -> bool:
 	_expected_provider_request_id = _provider_request_id_serial
 	var turn_id := _active_turn_id
 	var request_id := _expected_provider_request_id
+	_request_attribution = ResponseAttribution.sanitize({"model": _turn_provider_config.get("model", ""), "mode": _mode})
 	if _loop_final_request:
-		workflow_state_changed.emit(turn_id, "finalizing", {"trigger_reason": _loop_final_trigger_reason})
+		workflow_state_changed.emit(turn_id, "finalizing", {"trigger_reason": _loop_final_trigger_reason, "attribution": _request_attribution.duplicate(true)})
 	else:
-		workflow_state_changed.emit(turn_id, "thinking", {"follow_up": _tool_rounds > 0})
+		workflow_state_changed.emit(turn_id, "thinking", {"follow_up": _tool_rounds > 0, "attribution": _request_attribution.duplicate(true)})
 	if not _owns_turn(turn_id) or _expected_provider_request_id != request_id:
 		return false
+	if _turn_provider_config.get("provider") == "orca_cloud":
+		_send_hosted_request(turn_id, request_id, definitions)
+		return true
 	api_client.send_chat_completion(message_history, definitions, _turn_provider_config, {
 		"allow_stream_options_retry": _tool_rounds == 0,
-		"lifecycle_request_id": request_id
+		"lifecycle_request_id": request_id,
+		"_orca_include_history_images": _turn_include_history_images
 	})
 	return true
+
+
+func _send_hosted_request(turn_id: int, request_id: int, definitions: Array) -> void:
+	if account_service == null:
+		_finish_request_error("Connect your Orca account in Settings → Account.")
+		return
+	var config := _turn_provider_config.duplicate(true)
+	var auth: Dictionary = await account_service.authorization(str(config.get("hosted_identity", "")))
+	if not _owns_turn(turn_id) or _expected_provider_request_id != request_id:
+		return
+	if not auth.get("success", false):
+		_finish_request_error("Your Orca connection could not be refreshed. Reconnect in Account; completed work has not been replayed.")
+		return
+	config["api_key"] = auth["token"]
+	api_client.send_chat_completion(message_history, definitions, config, {"allow_stream_options_retry": false, "lifecycle_request_id": request_id, "_orca_include_history_images": _turn_include_history_images})
+
+
+func _on_cloud_metadata(request_id: int, metadata: Dictionary) -> void:
+	if _owns_provider_request(request_id) and _turn_provider_config.get("provider") == "orca_cloud":
+		_turn_provider_config["hosted_turn_binding"] = str(metadata.get("turn_binding", ""))
 
 
 func _can_finalize_for_context_pressure(definitions: Array) -> bool:
@@ -1388,6 +1521,11 @@ func _turn_allows_tools() -> bool:
 		return true
 	var provider = ProviderRegistry.get_provider(str(_turn_provider_config.get("provider", "custom")))
 	var definition: Dictionary = provider.definition()
+	if _turn_provider_config.get("provider") == "orca_cloud":
+		# Managed profiles are verified by the service operator, not re-probed by
+		# each subscriber. Authentication, fixed origin, exact capability revision
+		# and local Plan/Work/approval checks remain independent runtime boundaries.
+		return account_service != null and account_service.connected() and account_service.identity() == str(_turn_provider_config.get("hosted_identity", "")) and _turn_provider_config.get("hosted_agent_ready") == true and not str(_turn_provider_config.get("capability_version", "")).is_empty() and _turn_provider_config.get("hosted_verified_capability") == _turn_provider_config.get("capability_version") and _turn_provider_config.get("hosted_tools") == true and _turn_provider_config.get("hosted_allowed") == true and _turn_provider_config.get("hosted_available") == true and _turn_provider_config.get("hosted_context_policy", {}).get("version") == "utf8-conservative-v2" and EndpointPolicy.authorize_profile("orca_cloud", _turn_provider_config).get("success", false)
 	if not bool(definition.get("agent_tools", true)):
 		return bool(Config.agent_compatibility_status(str(_turn_provider_config.get("provider", "custom")), _turn_provider_config).get("enabled", false))
 	var configured := EndpointPolicy.inspect_base_url(str(_turn_provider_config.get("base_url", "")))
@@ -1399,7 +1537,7 @@ func _turn_allows_tools() -> bool:
 	return true
 
 func _get_system_prompt() -> String:
-	var shared := "You are Orca, an AI game-development assistant integrated into the Godot editor. Use project tools proactively to understand the user's Godot project. Prefer inspect_scene over raw file reads when understanding saved .tscn structure; it reports saved serialized state, does not include unsaved or runtime-generated nodes, and does not recursively expand scene instances. Prefer inspect_project_settings over reading project.godot when understanding project configuration; omit setting_path for the bounded overview or provide one exact non-sensitive path. Be concise, explain important decisions, and never claim a tool action succeeded unless its result confirms success. For genuinely multi-step work, maintain the session checklist with update_tasks; provide the complete desired list, keep at most one item in_progress, and do not use it for trivial one-step requests."
+	var shared := "You are Orca, an AI game-development assistant integrated into the Godot editor. Use project tools proactively to understand the user's Godot project. Prefer inspect_editor_scene for the user's current scene or selection, especially unsaved layout and transform changes; selection reads selected nodes only, scene/subtree read bounded descendants. Pass the expected scene_path from current context when available. Treat its native values as a live editor snapshot, not runtime evidence or a patch base; never ask users to save merely for this read. Project edits still require saved state, a fresh read_file hash, and normal approval. Prefer inspect_scene over raw file reads when understanding saved .tscn structure; it reports saved serialized state, does not include unsaved or runtime-generated nodes, and does not recursively expand scene instances. Prefer inspect_project_settings over reading project.godot when understanding project configuration; omit setting_path for the bounded overview or provide one exact non-sensitive path. Be concise, explain important decisions, and never claim a tool action succeeded unless its result confirms success. For genuinely multi-step work, maintain the session checklist with update_tasks; provide the complete desired list, keep at most one item in_progress, and do not use it for trivial one-step requests."
 	if _mode == AgentMode.PLAN:
 		return shared + " You are in Plan mode. Explore and analyze the project using read-only tools, identify relevant files, ask focused questions when needed, and produce a concrete implementation plan. You may update Orca's session checklist, but you must not create, edit, delete, apply changes, or start/stop game processes. If and only if the user asked you to implement, modify, run, or otherwise perform work that requires Work mode, use request_work_mode once with a concise reason. Wait for the user's decision. If they decline, remain in Plan mode and finish with a useful plan; do not ask again in that turn. Do not request Work mode for analysis-only or planning requests."
 	return shared + " You are in Work mode. You may search and read project files, inspect current editor context and diagnostics, propose reviewed changes, and run or stop only Orca-owned game processes. Read relevant line ranges first and use the SHA-256 returned by read_file as base_hash. Use propose_scene_changes for structured scene creation, nodes, typed properties, dependency-free scripts and child instances, and bindless signals instead of writing .tscn text. Script attach/detach requires a script_hash from read_file and two user decisions: trust to execute the exact script while constructing a candidate, then approval to apply it. Use propose_input_map_changes for typed Input Map changes, propose_main_scene_change to configure the launch scene, propose_project_settings_changes for allowlisted display settings, and apply_patch for minimal non-overlapping source edits. Use run_current_scene or run_main_scene only when execution advances the task. Declare clean_startup or expected_exit verification before launch when those narrow criteria match the task, preserve the same criteria across reruns, and use observe_game_run or get_diagnostics for later evidence. Orca automatically waits briefly for one bounded observation after launch. Only claim verified when verify_game_run returns passed; launch, a zero exit code, or absence of retained errors does not establish gameplay correctness. Visual behavior, input feel, animation, and rendering remain unverified without visual evidence. Use stop_game only for the current Orca-owned run. Every project file change requires explicit user approval before it is applied."
@@ -1548,6 +1686,7 @@ func _reset_session_usage() -> void:
 	_session_output_tokens = 0
 	_session_cached_tokens = 0
 	_latest_context_tokens = 0
+	_last_request_budget.clear()
 	_session_cost_usd = 0.0
 	_usage_complete = true
 	_cost_complete = true
@@ -1592,7 +1731,8 @@ func _record_request_usage(response: Dictionary) -> void:
 		"model": model,
 		"configured_model": configured_model,
 		"api_url": api_url,
-		"reported_cost": float(usage.get("cost", -1.0))
+		"reported_cost": float(usage.get("cost", -1.0)),
+		"hosted_metadata": preload("res://addons/orca/scripts/account_service.gd").pricing_metadata({"context_window": _turn_provider_config.get("hosted_context_window", 0), "pricing": _turn_provider_config.get("hosted_pricing", {})}) if _turn_provider_config.get("provider") == "orca_cloud" else {}
 	})
 	_recalculate_session_cost()
 	_emit_session_usage(model)
@@ -1660,13 +1800,13 @@ func _emit_session_usage(model: String = "") -> void:
 	session_usage_changed.emit(summary)
 
 
-func _session_usage_summary(model: String = "") -> Dictionary:
+func _session_usage_summary(model: String = "", include_request_budget: bool = true) -> Dictionary:
 	var effective_model := Config.get_model() if model.is_empty() else model
 	var configured_model := Config.get_model() if _last_configured_model.is_empty() else _last_configured_model
 	var api_url := Config.get_api_url() if _last_api_url.is_empty() else _last_api_url
 	var metadata := ModelMetadata.resolve(effective_model, api_url, configured_model)
 	var pricing_available := metadata.has("input_per_million") and metadata.has("output_per_million")
-	return {
+	var summary := {
 		"model": configured_model,
 		"context_tokens": _latest_context_tokens,
 		"context_limit": _restored_context_limit if _restored_context_limit > 0 else int(metadata.get("context_window", 0)),
@@ -1680,6 +1820,10 @@ func _session_usage_summary(model: String = "") -> Dictionary:
 		"cost_estimated": _cost_estimated or (_completed_requests == 0 and pricing_available),
 		"completed_requests": _completed_requests
 	}
+	if include_request_budget and not _last_request_budget.is_empty():
+		summary["request_budget"] = _last_request_budget.duplicate(true)
+		summary["request_budget"]["active"] = _is_running
+	return summary
 
 
 func _recalculate_session_cost() -> void:
@@ -1694,6 +1838,8 @@ func _recalculate_session_cost() -> void:
 				str(request_data.get("api_url", "")),
 				str(request_data.get("configured_model", ""))
 			)
+			if not request_data.get("hosted_metadata", {}).is_empty():
+				metadata = request_data["hosted_metadata"]
 			request_cost = ModelMetadata.calculate_cost(request_data.get("usage", {}), metadata)
 			_cost_estimated = true
 		if request_cost < 0.0:
@@ -1726,6 +1872,8 @@ func _restore_session_usage(usage: Dictionary) -> void:
 
 func _valid_continuation(continuation: Array) -> bool:
 	if continuation.size() > 120:
+		return false
+	if not ScriptReferences.validate_messages(continuation).is_empty():
 		return false
 	for message in continuation:
 		if typeof(message) != TYPE_DICTIONARY:

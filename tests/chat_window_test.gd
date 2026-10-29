@@ -67,10 +67,12 @@ func _run() -> void:
 	await _test_compact_composer(view)
 	_test_active_composer_lifecycle(view)
 	await _test_final_rendering(view)
+	await _test_response_footer(view)
 	await process_frame
 	await process_frame
 	_test_working_indicator(view)
 	_test_turn_event_ownership(view)
+	_test_request_budget_feedback(view)
 	_test_work_mode_request_ui(view)
 	await process_frame
 	await _test_active_feed_follow(view)
@@ -150,6 +152,21 @@ func _test_ui_scale_math() -> void:
 	_expect(UiMetrics.scaled(10, 1.0) == 10.0, "100% UI metrics should preserve authored dimensions")
 	_expect(UiMetrics.scaled(10, 1.25) == 13.0, "fractional editor scaling should round authored dimensions")
 	_expect(UiMetrics.scaled_vector(Vector2(24, 28), 2.0) == Vector2(48, 56), "200% UI metrics should scale both dimensions once")
+
+
+func _test_request_budget_feedback(view) -> void:
+	var summary := {"context_tokens": 4088, "context_limit": 32768, "completed_requests": 5, "usage_complete": true, "request_budget": {"estimated_tokens": 38000, "context_limit": 32768, "input_budget": 24576, "output_reserve": 8192, "tool_reserve": 0, "status": "blocked", "active": false}}
+	view._sync_session_usage(summary)
+	_expect(view.context_label.text == "Request ~38.0k / 32.8k", "a blocked continuation must show its local estimate instead of the last completed 4.1k request")
+	_expect(view.context_label.tooltip_text.contains("4088") or view.context_label.tooltip_text.contains("4.1k"), "last provider usage must remain separately labeled")
+	_expect(view.context_label.tooltip_text.contains("24576") and view.context_label.tooltip_text.contains("8192"), "blocked feedback must explain input and response reserves")
+	summary["request_budget"]["status"] = "prepared"
+	summary["request_budget"]["active"] = true
+	view._sync_session_usage(summary)
+	_expect(view.context_label.text.begins_with("Request ~"), "active requests must use a clearly estimated metric")
+	summary["request_budget"]["active"] = false
+	view._sync_session_usage(summary)
+	_expect(view.context_label.text == "Context 4.1k / 32.8k", "completed requests must retain provider-reported context without replacing billing usage")
 
 
 func _test_compact_composer(view) -> void:
@@ -239,6 +256,79 @@ func _test_stream_finalization(view) -> void:
 	_expect(editors.size() == 1 and editors[0].text == "print(\"✓\")", "tool-preface finalization should materialize completed code")
 	var events: Array = view._session.get("events", [])
 	_expect(not events.is_empty() and events[-1].get("completion") == "tool_preface", "tool-preface text should retain its completion marker")
+
+
+func _test_response_footer(view) -> void:
+	view._session = {"events": []}
+	view._clear_chat_feed()
+	await process_frame
+	var attribution := {"model": "deepseek-v4-pro", "mode": 0, "provider": "hidden", "reasoning": "hidden"}
+	for source in ["Plain answer", "```gdscript\nprint(1)\n```"]:
+		view._add_final_assistant_message("Orca", source, Color.LIGHT_GREEN, attribution)
+		var panel: Control = view.chat_feed.get_child(view.chat_feed.get_child_count() - 1)
+		var footers := _collect_nodes(panel, "orca_response_footer")
+		var models := _collect_nodes(panel, "orca_response_model", Label)
+		var modes := _collect_nodes(panel, "orca_response_mode", Label)
+		_expect(footers.size() == 1 and models.size() == 1 and modes.size() == 1, "plain and fenced-code answers must share one model/mode footer")
+		_expect(models[0].text == "deepseek-v4-pro" and models[0].tooltip_text == models[0].text and modes[0].text == "Plan", "footers must show the full configured model and response mode only")
+		_expect(modes[0].get_theme_color("font_color") == view._assistant_color_for_mode(0), "footer mode must use Orca's response-bound Plan accent")
+		view._set_response_footer(panel, attribution)
+		_expect(_collect_nodes(panel, "orca_response_footer").size() == 1, "reapplying attribution must replace rather than duplicate a footer")
+		await process_frame
+		await process_frame
+		_expect(panel.get_combined_minimum_size().x <= 300.0, "model/mode attribution must not widen a narrow dock")
+		_expect(not is_instance_valid(models[0]) or models[0].is_queued_for_deletion(), "replaced metadata controls should be released")
+	view._add_final_assistant_message("Orca", "Legacy answer", Color.LIGHT_GREEN)
+	var legacy: Node = view.chat_feed.get_child(view.chat_feed.get_child_count() - 1)
+	_expect(_collect_nodes(legacy, "orca_response_footer").is_empty(), "missing historical attribution must not be guessed from current settings")
+	view._add_final_assistant_message("Orca", "Long model", Color.LIGHT_GREEN, {"model": "namespace/" + "long-model-name-".repeat(30), "mode": 1})
+	await process_frame
+	await process_frame
+	var long_panel: Control = view.chat_feed.get_child(view.chat_feed.get_child_count() - 1)
+	var long_model: Label = _collect_nodes(long_panel, "orca_response_model", Label)[0]
+	var long_mode: Label = _collect_nodes(long_panel, "orca_response_mode", Label)[0]
+	_expect(long_panel.get_combined_minimum_size().x <= 300.0 and long_model.max_lines_visible == 2 and long_model.tooltip_text.length() > 400, "long full identifiers must remain bounded with complete hover text")
+	_expect(long_mode.get_global_rect().end.x <= long_panel.get_global_rect().end.x, "the response mode must remain inside the card's right edge")
+
+	view._clear_chat_feed()
+	view._session = {"events": []}
+	await process_frame
+	view._on_turn_request_state_changed(91, true)
+	view._on_turn_workflow_state_changed(91, "thinking", {"attribution": {"model": "model-A", "mode": 0}})
+	view._on_turn_message_stream_started(91)
+	view._on_turn_message_stream_delta(91, "Planning preface")
+	view._finish_stream_before_activity()
+	view._on_turn_workflow_state_changed(91, "thinking", {"follow_up": true, "attribution": {"model": "model-A", "mode": 1}})
+	view._on_turn_message_received(91, "assistant", "Work answer", {"model": "model-A", "mode": 1})
+	var events: Array = view._session["events"]
+	_expect(events[0]["attribution"] == {"model": "model-A", "mode": 0} and events[0]["mode"] == 0 and events[1]["attribution"] == {"model": "model-A", "mode": 1}, "tool prefaces and final answers must preserve their generating request's mode")
+	view._on_turn_request_state_changed(92, true)
+	view._on_turn_workflow_state_changed(92, "thinking", {"attribution": {"model": "model-B", "mode": 0}})
+	view._on_turn_message_stream_started(92)
+	view._on_turn_message_stream_delta(92, "Partial answer")
+	view._on_turn_error_occurred(92, "Synthetic footer failure")
+	_expect(view._session["events"][-2].get("completion") == "incomplete" and view._session["events"][-2].get("attribution") == {"model": "model-B", "mode": 0}, "failed partial responses must retain attribution without being promoted to complete")
+	view._on_turn_request_state_changed(93, true)
+	view._on_turn_workflow_state_changed(93, "thinking", {"attribution": {"model": "model-C", "mode": 1}})
+	view._on_turn_message_stream_started(93)
+	view._on_turn_message_stream_delta(93, "Stopped portion")
+	view._on_turn_request_cancelled(93)
+	_expect(view._session["events"][-2].get("completion") == "cancelled" and view._session["events"][-2].get("attribution") == {"model": "model-C", "mode": 1}, "Stop must preserve attribution on visible partial text only")
+	view._on_turn_request_state_changed(94, true)
+	view._on_turn_workflow_state_changed(94, "thinking", {"attribution": {"model": "model-D", "mode": 0}})
+	view._on_turn_message_received(93, "assistant", "Stale", {"model": "wrong-model", "mode": 1})
+	_expect(view._response_attribution == {"model": "model-D", "mode": 0}, "stale terminal metadata must not overwrite a newer turn")
+	view._on_turn_message_stream_started(94)
+	view._on_turn_request_cancelled(94)
+	view._clear_chat_feed()
+	await process_frame
+	for event in events.slice(0, 2):
+		view._render_session_event(event)
+	var restored_models := _collect_nodes(view.chat_feed, "orca_response_model", Label)
+	var restored_modes := _collect_nodes(view.chat_feed, "orca_response_mode", Label)
+	_expect(restored_models.size() == 2 and restored_models[0].text == "model-A" and restored_modes[0].text == "Plan" and restored_modes[1].text == "Work", "History restoration must render per-answer model/mode instead of current selection")
+	view._clear_chat_feed()
+	await process_frame
 
 
 func _test_working_indicator(view) -> void:
@@ -521,6 +611,8 @@ func _test_restored_tool_grouping(view) -> void:
 
 func _test_intelligence_tool_activity(view) -> void:
 	view._session = {"events": []}
+	var wire_query: Dictionary = JSON.parse_string('{"scope":"scene","max_nodes":2,"max_depth":1}')
+	_expect(view._safe_tool_arguments(wire_query, "inspect_editor_scene") == {"scope": "scene", "max_nodes": 2, "max_depth": 1}, "live activity must retain normalized integral limits from provider JSON")
 	view._clear_chat_feed()
 	await process_frame
 	view._on_tool_execution_started("skill_1", "read_project_skill", {"name": "Godot Gameplay", "body": "private skill body", "sha256": "private hash"})
@@ -531,15 +623,21 @@ func _test_intelligence_tool_activity(view) -> void:
 	view._on_tool_execution_completed("function_1", "read_gdscript_function", {"content": "private function body", "outcome": "completed", "data": {"open_path": "res://player.gd", "open_line": 9, "disk_sha256": "private hash"}}, 6)
 	view._on_tool_execution_started("deps_1", "discover_dependencies", {"filepath": "res://main.tscn", "direction": "reverse", "max_depth": 3, "max_results": 50, "graph": "private graph"})
 	view._on_tool_execution_completed("deps_1", "discover_dependencies", {"content": "private dependency graph", "outcome": "completed", "data": {"graph": "private graph"}}, 7)
+	view._on_tool_execution_started("live_1", "inspect_editor_scene", {"scope": "subtree", "node_path": "Menu/Panel", "scene_path": "res://menu.tscn", "max_depth": 2, "nodes": ["private live scene"], "base_hash": "private hash"})
+	view._on_tool_execution_completed("live_1", "inspect_editor_scene", {"content": "private live scene", "outcome": "completed", "data": {"source": "editor_scene", "returned_node_count": 3, "unsaved_changes": true, "truncated": true, "nodes": ["private live scene"]}}, 8)
 	var groups := _collect_nodes(view.chat_feed, "orca_tool_group")
-	_expect(groups.size() == 1 and groups[0].call_count() == 4, "all Orca 1.1 intelligence reads should join consecutive activity groups")
+	_expect(groups.size() == 1 and groups[0].call_count() == 5, "intelligence and live editor reads should join consecutive activity groups")
 	var events: Array = view._session.get("events", [])
 	var persisted := JSON.stringify(events)
-	_expect(events.size() == 4 and events[0].get("arguments") == {"name": "Godot Gameplay"}, "skill activity should persist only its bounded name")
+	_expect(events.size() == 5 and events[0].get("arguments") == {"name": "Godot Gameplay"}, "skill activity should persist only its bounded name")
 	_expect(events[1].get("arguments", {}).get("class_name") == "Node" and events[1].get("help_topic") == "class_method:Node:add_child", "API activity should persist its safe query and help topic")
 	_expect(events[2].get("arguments", {}).get("function_name") == "move" and events[2].get("open_path") == "res://player.gd", "function activity should retain bounded query and file navigation metadata")
 	_expect(events[3].get("arguments", {}).get("direction") == "reverse" and events[3].get("arguments", {}).get("max_results") == 50, "dependency activity should retain only its bounded query controls")
 	_expect(not persisted.contains("private skill body") and not persisted.contains("private API report") and not persisted.contains("private function body") and not persisted.contains("private dependency graph") and not persisted.contains("private hash") and not persisted.contains("private report"), "intelligence activity must redact bodies, reports, graphs, and hashes")
+	_expect(not persisted.contains("private live scene") and events[4].get("arguments") == {"scope": "subtree", "node_path": "Menu/Panel", "scene_path": "res://menu.tscn", "max_depth": 2}, "live inspection must persist only bounded query controls, never nodes or snapshot values")
+	_expect(str(events[4].get("summary", "")).contains("Historical") and str(events[4].get("summary", "")).contains("unsaved") and str(events[4].get("summary", "")).contains("truncated"), "restorable live activity should honestly identify historical dirty/truncated inspection")
+	var live_card = groups[0].get_card("live_1")
+	_expect(live_card._header_button.text.contains("Inspect live scene") and live_card._header_button.text.contains("Menu/Panel") and not live_card._open_button.visible, "live cards need scope labels without reopening or saving an edited scene")
 	var api_card = groups[0].get_card("api_1")
 	_expect(api_card != null and api_card._help_button.visible, "live API execution metadata should show Open Docs")
 	groups[0].set_expanded(true)
@@ -553,6 +651,13 @@ func _test_intelligence_tool_activity(view) -> void:
 	var restored_groups := _collect_nodes(view.chat_feed, "orca_tool_group")
 	var restored_card = restored_groups[0].get_card("api_1") if restored_groups.size() == 1 else null
 	_expect(restored_card != null and restored_card._help_button.visible, "restored API activity should reconstruct Open Docs metadata")
+	view._render_session_event(events[4])
+	var restored_live = restored_groups[0].get_card("live_1") if restored_groups.size() == 1 else null
+	# The API group was closed above, so the historical live read starts a new group.
+	var all_restored := _collect_nodes(view.chat_feed, "orca_tool_group")
+	if all_restored.size() == 2:
+		restored_live = all_restored[1].get_card("live_1")
+	_expect(restored_live != null and restored_live._details.text.contains("Historical") and not restored_live._open_button.visible, "restored snapshots must be historical summaries without actionable editor identity")
 	view._on_help_requested("https://example.invalid/docs")
 
 
@@ -865,6 +970,9 @@ func _test_recovery_event_persistence(view) -> void:
 	view._update_tool_event("recovery_tool", {"outcome": "apply_recovery_required", "data": {}}, 1)
 	var tool_event: Dictionary = view._session.get("events", [])[1]
 	_expect(tool_event.get("summary") == "Recovery required. See the associated change record.", "uncertain mutation activity must not persist as completed successfully")
+	view._session["events"][1]["name"] = "inspect_scene"
+	view._update_tool_event("recovery_tool", {"outcome": "failed", "data": {}}, 1)
+	_expect(view._session["events"][1].get("summary") == "Tool did not complete.", "ordinary read failures must not claim that a file recovery/change record exists")
 
 	for card_script in [InputMapChangeCard, MainSceneChangeCard, ProjectSettingsChangeCard, SceneChangeCard]:
 		var structured_card = card_script.new()

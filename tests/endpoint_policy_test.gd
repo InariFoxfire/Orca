@@ -8,6 +8,7 @@ var _failures := PackedStringArray()
 func _init() -> void:
 	_test_parsing()
 	_test_classification_and_confirmation()
+	_test_managed_cloud_origin()
 	_finish()
 
 
@@ -36,6 +37,16 @@ func _test_classification_and_confirmation() -> void:
 	config["base_url"] = "http://192.168.1.2:11435/v1"
 	_expect(not EndpointPolicy.authorize_profile("ollama", config).get("success", true), "port changes should invalidate confirmation")
 	_expect(not EndpointPolicy.authorize_profile("openai", {"base_url": "http://attacker.example/v1", "confirmed_origin": ""}).get("success", true), "fixed provider overrides should fail without explicit exact-origin confirmation")
+
+
+func _test_managed_cloud_origin() -> void:
+	var config := {"base_url": "https://cloud.aiorca.dev/v1"}
+	var authorized := EndpointPolicy.authorize_profile("orca_cloud", config)
+	_expect(authorized.get("success", false) and not authorized.get("requires_confirmation", true), "fixed production Cloud endpoint is ready without custom-origin confirmation")
+	_expect(EndpointPolicy.validate_generated_endpoint("https://cloud.aiorca.dev/v1/chat/completions", str(authorized.get("origin", ""))).get("success", false), "production chat endpoint retains the authorized origin")
+	for url in ["http://127.0.0.1:8000/v1", "http://cloud.aiorca.dev/v1", "https://cloud.aiorca.dev:8443/v1", "https://cloud.aiorca.dev.attacker.example/v1", "https://cloud.aiorca.dev/other/v1"]:
+		var override_config := {"base_url": url, "confirmed_origin": EndpointPolicy.inspect_base_url(url).get("origin", "")}
+		_expect(not EndpointPolicy.authorize_profile("orca_cloud", override_config).get("success", true), "managed credentials reject confirmed noncanonical endpoints: " + url)
 
 
 func _expect(condition: bool, message: String) -> void:

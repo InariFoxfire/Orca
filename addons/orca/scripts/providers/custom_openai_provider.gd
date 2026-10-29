@@ -13,3 +13,8 @@ func definition() -> Dictionary:
 		"description": "Custom or local compatible endpoint",
 		"custom_url": true
 	}
+
+
+func apply_chat_options(body: Dictionary, effort: String) -> void:
+	if not effort.is_empty() and effort != "default":
+		body["reasoning_effort"] = effort

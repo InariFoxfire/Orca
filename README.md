@@ -33,7 +33,7 @@ Inspect your project, understand editor context, propose Godot-aware changes, an
 
 Orca is an MIT-licensed AI agent built directly into the Godot editor. It combines project exploration, editor awareness, Godot-specific tools, reviewed changes, and bounded runtime workflows in one native editor dock.
 
-Use a hosted model or bring your own local model through **Ollama**, **LM Studio**, or another OpenAI-compatible server. Orca keeps the workflow visible: it shows what it is inspecting, presents changes for review, validates supported edits, and waits for approval before writing to your project.
+Connect an **Orca Cloud account**, bring your own provider API key, or use a local model through **Ollama**, **LM Studio**, or another OpenAI-compatible server. Orca keeps the workflow visible: it shows what it is inspecting, presents changes for review, validates supported edits, and waits for approval before writing to your project.
 
 > Orca is not a general chatbot placed beside Godot. It is a Godot development tool designed around scenes, scripts, resources, project settings, editor state, and safe project changes.
 
@@ -52,6 +52,7 @@ Orca runs as a Godot `EditorPlugin`, not as a separate desktop application or br
 Orca can work with Godot concepts instead of treating the project as an unstructured folder of text:
 
 - Inspect saved scene hierarchies, serialized properties, groups, instances, and signal connections.
+- Inspect the current editor scene, selected nodes, or a subtree with unsaved layout/transform changes and native parent context; live inspection remains read-only and supplies no disk patch hash.
 - Read focused GDScript functions, including the exact unsaved source currently open in the script editor.
 - Inspect selected project settings, Input Map actions, resource dependencies, diagnostics, and reflected Godot API signatures.
 - Propose reviewed file edits, Input Map changes, main-scene changes, selected display settings, and constrained scene operations.
@@ -77,21 +78,63 @@ Orca is released under the [MIT License](LICENSE). Its source, tool contracts, s
 - Visible, grouped tool activity with navigation back into the project.
 - Persistent project-scoped conversations and multi-step task lists.
 - Rich code blocks, unified diffs, expanded side-by-side review, and Apply/Reject/Revert controls.
+- Model-and-mode response footers retain the full configured model ID and response mode across model switches and restored history.
 - Context-window and session-cost visibility when provider metadata is available.
 - Request-scoped project instructions and explicitly loaded project skills.
 
-## What's New In 1.3.0
+## What's New In 1.4.0
 
-Orca 1.3.0 adds visual references to the development workflow and refreshes settings:
+The Orca 1.4.0 release candidate adds account access, deeper editor context, and a complete build/update workflow:
 
-- Attach PNG, JPEG, and WebP still images to requests using vision-capable models.
-- Paste screenshots, drag existing project images, or use a separate native desktop drop/Browse window.
-- Floating thumbnails, larger previews, and restored image context in project conversation history.
-- Model-aware attachment controls, explicit unknown-profile configuration, and bounded image preparation/context/storage.
-- Neutral icon navigation for Provider, System, and About settings, with an English-only language field.
-- About links to documentation, the website, source, issues, and feature discussions.
+- Orca Cloud browser sign-in/sign-up, persistent OS-vault sessions, account allowance/model selection, and automatic managed Agent readiness.
+- Dismissible connection onboarding that preserves the original empty state and your draft.
+- Live editor scene/selection inspection and explicit saved/active-unsaved script references.
+- Microsoft Foundry / Azure Responses, bounded private reasoning continuation, and one-click Agent compatibility enablement.
+- Vision/text-only model switching within a conversation, response attribution, native review minimaps, and the composer Tab mode shortcut.
+- Daily update checks, confirmed Update & Restart/rollback, four-platform native helper builds, and complete versioned plugin packages.
 
-Read the complete release notes in the [changelog](CHANGELOG.md) or download the latest build from [GitHub Releases](https://github.com/cold-atom/Orca/releases/latest).
+Read the prepared release notes in the [changelog](CHANGELOG.md). After these changes are pushed, successful GitHub Actions runs provide the `orca-package` artifact with `orca-v1.4.0.zip` and its checksum. Published versions are available from [GitHub Releases](https://github.com/cold-atom/Orca/releases/latest); 1.4.0 publication and Windows/macOS acceptance are pending.
+
+### Orca Account
+
+Settings now includes **Account** after System. Orca Cloud connects to
+`https://cloud.aiorca.dev`. Click **Sign in / Sign up**, sign in or register in
+your browser, and approve the matching editor code. An included model is selected
+automatically; use **Choose model** to switch. Managed models require no Agent-tool
+or reasoning setup. The connection is remembered across projects/editor restarts
+through your OS credential vault.
+
+The Linux x86_64 credential helper is included and requires Secret Service/libsecret.
+The native Actions workflow builds/tests Windows x86_64 and Apple Silicon/Intel Mac
+helpers and assembles a complete plugin ZIP; their CI/platform acceptance is pending.
+See [build/release/Asset Library steps](docs/UPDATES.md#builds-and-downloads-from-github-actions).
+After updating the addon, restart the
+editor and sign in again: localhost development credentials are isolated from
+the deployed service, and development accounts may need registration there.
+See the [addon setup guide](addons/orca/README.md#orca-account) for account and provider setup.
+
+### Connection setup overlay
+
+The original Orca empty state is preserved. New unconfigured users see a separate
+overlay with **Sign in / Sign up with Orca** and **Bring your own API key**,
+including local providers. Close, Escape or **Set up later** dismisses it; sending
+without a connection brings it back. The composer stays usable and your draft is
+preserved. Finish setup, return with **Done**, then press **Send**. Configured users
+skip the automatic overlay.
+
+### Plugin updates
+
+Orca checks stable GitHub Releases daily and shows a dismissible update notice.
+**Settings → General Settings** provides manual checking, release notes, an automatic-check
+toggle and **Update & Restart**. Confirmed updates verify and stage the official
+package, retain a rollback copy and restart the current project through an independent
+installer. Local addon changes are preserved. Install the first updater-equipped
+release manually once; future updates use its release manifest. See the
+[update and release guide](docs/UPDATES.md).
+
+### Microsoft Foundry / Azure
+
+Connect a Foundry resource using its `/openai/v1` base URL, API key, and exact deployment name. The profile supports stateless **Responses** for reasoning-enabled GPT function tools, explicit **Chat Completions** reasoning (including `none`), and opt-in **DeepSeek reasoning** continuation. **Test & Enable Agent tools** enables tools automatically after a matching synthetic compatibility pass. See the [add-on setup guide](addons/orca/README.md#microsoft-foundry--azure); live deployment acceptance remains a manual check.
 
 ## Image Attachments
 
@@ -107,6 +150,14 @@ Give Orca a screenshot of your UI, a reference image, or an error screenshot alo
 Orca accepts up to four PNG/JPEG/WebP still images per message. Source files are limited to 10 MiB and 16 megapixels, then normalized to PNG at up to 2048 pixels per side and 1 MiB each. Prepared images remain available through tool follow-ups and restore with conversation history. PDFs, documents, animated images, and automatic screenshot capture are not included.
 
 Custom/local profiles with unknown image capability can explicitly enable unconfirmed input under Provider settings for the exact endpoint/model. This is a compatibility assertion, not a vision-quality test.
+
+**Model switching:** Earlier images no longer lock a session to vision models. Text-only requests retain conversation text and existing image descriptions with explicit placeholders; original images and previews remain saved. Switching back to vision includes original images still in retained model context. New attachments require confirmed image support, and the selected model/image policy stays fixed through an active turn.
+
+## Script References
+
+Drag project `.gd` files from Godot's FileSystem dock or open-script list onto Orca's prompt box. Up to four removable chips can accompany a message; click a filename to open it and hover for its full project path. Script references work with text-only models and Chat-only profiles, and can accompany images.
+
+Source is captured when you press Send, capped at 300 lines / 16 KiB per script with explicit truncation. Orca uses the exact active unsaved script text when available; activate or save an inactive dirty script before submitting it. Submitted references and bounded source snapshots restore with conversation history as plaintext local data. They provide context, while edits retain normal fresh-file checks and approval.
 
 ## Demo
 
@@ -132,7 +183,7 @@ Orca can connect to models served on your machine. Local inference can provide g
 4. Confirm the endpoint, refresh the available models, or enter a Model ID manually.
 5. Start chatting. No API key is required when the local server does not require one.
 
-Local and editable profiles start in **Chat mode**. Before Orca exposes project Agent tools, an isolated two-step function-call probe must pass for the exact provider, origin, endpoint, model, reasoning configuration, and probe version. You must then explicitly enable Agent tools for that binding.
+Local and editable profiles start in **Chat mode**. Click **Test & Enable Agent tools** to run the isolated two-step function-call probe. A pass for the exact provider, origin, endpoint, model, reasoning configuration, API, continuation style, and probe version automatically enables tools. The toggle remains available to turn tools off; failed or cancelled checks leave them disabled.
 
 The probe contains no project files, editor context, instructions, skills, task list, conversation history, or real Orca tool schema. A successful probe confirms one narrow protocol exchange; it does not guarantee that a model will plan well or use tools reliably on a real project.
 
@@ -140,17 +191,19 @@ Orca does not install models, bundle inference, or start and manage Ollama or LM
 
 ## Supported Providers
 
+- Orca Cloud (managed account access)
 - OpenAI
 - Google Gemini
 - xAI
 - DeepSeek
 - OpenRouter
+- Microsoft Foundry / Azure
 - Ollama
 - LM Studio
 - Local OpenAI-compatible servers
 - Custom OpenAI-compatible endpoints
 
-Orca currently uses a streamed Chat Completions transport. Separate credentials, endpoint, model, and reasoning-effort settings are retained per provider.
+Orca uses streamed Chat Completions and supports stateless Responses through the Foundry / Azure profile. BYOK credentials, endpoint, model, and reasoning-effort settings are retained per provider; managed Orca Cloud models use account-eligible catalog settings and server defaults.
 
 ## How Safety Works
 
@@ -180,7 +233,7 @@ Orca complements source control, code review, backups, and project testing; it d
 2. Extract its `addons/orca/` directory into your Godot project's `addons/` directory.
 3. Open the project in Godot 4.7.2.
 4. Enable **Orca** in **Project > Project Settings > Plugins**.
-5. Open the Orca dock, select a provider, configure a model, and start a session.
+5. Open the Orca dock and use the connection overlay or Settings to sign into Orca Cloud or configure a hosted/local provider and model. Return with **Done**, then explicitly **Send** your prompt.
 
 For development setup and test commands, see [DEVELOPMENT.md](DEVELOPMENT.md) and [tests/README.md](tests/README.md).
 
@@ -190,7 +243,9 @@ Before submitting a request, make sure you trust the selected provider and endpo
 
 Editable LAN and remote endpoints require confirmation for their exact scheme, host, and effective port. Orca identifies unencrypted non-loopback HTTP connections and does not follow provider chat or model-discovery redirects. Confirmation is informed consent, not proof that a server is trustworthy.
 
-API credentials are saved through Godot Editor Settings. Project conversation history, including submitted images, is stored locally as plaintext JSON under Godot's `user://` storage. Pending attachment drafts are memory-only; submitted images are removed with conversation deletion/retention. Sessions retain at most 32 unique images / 8 MiB of image data within a 16 MiB total JSON limit. Neither storage mechanism is an encrypted operating-system credential vault.
+BYOK provider API keys are saved through Godot Editor Settings. Managed Orca account refresh/session credentials use the OS vault, and access tokens stay in memory. Project conversation history, including submitted images, is stored locally as plaintext JSON under Godot's `user://` storage. Pending attachment drafts are memory-only; submitted images are removed with conversation deletion/retention. Sessions retain at most 32 unique images / 8 MiB of image data within a 16 MiB total JSON limit. Provider EditorSettings and conversation JSON are not encrypted credential-vault storage.
+
+Script references send explicit project paths and bounded saved/unsaved source snapshots to the selected endpoint and retain them with the message in local history. Pending reference paths remain memory-only; conversation deletion/retention removes submitted snapshots.
 
 The About page can copy a privacy-safe diagnostic report for support. It uses a strict allowlist containing Orca/Godot versions and coarse provider/request state; it excludes credentials, endpoint addresses, model IDs, project paths and content, conversations, model output, logs, process output, file changes, and hashes.
 
@@ -200,7 +255,8 @@ See [SECURITY.md](SECURITY.md) for the complete security and operational model.
 
 ## Current Limits
 
-- Orca 1.3.0 supports Godot **4.7.2**. Broader Godot compatibility is not currently claimed.
+- Orca 1.4.0 targets Godot **4.7.2**. Broader Godot compatibility is not currently claimed.
+- Windows/macOS native helper CI and downloaded-plugin/update acceptance remain pending; Linux native-vault and headless updater fixtures are verified.
 - Native attachment drops were verified on Linux/X11/Vulkan; other platforms/renderers and detached editor windows need acceptance testing.
 - Runtime verification uses bounded process output and predeclared startup or exit criteria. It cannot prove visual or gameplay correctness.
 - Pending approvals and revert checkpoints do not survive an editor or plugin restart.
@@ -213,7 +269,7 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for the full architecture, tool contracts, 
 
 ## Project Status
 
-The prepared release is **Orca 1.3.0** for **Godot 4.7.2**. Orca is a functional development-stage agent with permanent automated tests and CI, but it is still evolving. Review proposals carefully and use version control on real projects.
+The prepared release candidate is **Orca 1.4.0** for **Godot 4.7.2**. Publication remains owner-controlled after GitHub CI and platform acceptance. Orca is a functional development-stage agent with permanent automated tests and CI, but it is still evolving. Review proposals carefully and use version control on real projects.
 
 ## Contributing
 

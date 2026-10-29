@@ -6,14 +6,16 @@ const TOKEN_BYTES := 3
 const MESSAGE_OVERHEAD_TOKENS := 8
 const TOOL_OVERHEAD_TOKENS := 24
 const ImageAttachments = preload("res://addons/orca/scripts/image_attachments.gd")
+const ScriptReferences = preload("res://addons/orca/scripts/script_references.gd")
 
 
-static func prepare(messages: Array, tools: Array, context_window: int) -> Dictionary:
-	var original_estimate := estimate_tokens(messages, tools)
+static func prepare(messages: Array, tools: Array, context_window: int, include_history_images: bool = true, hosted_output_tokens: int = 0, context_policy: Dictionary = {}) -> Dictionary:
+	var hosted := hosted_output_tokens > 0
+	var original_estimate := estimate_tokens(messages, tools, include_history_images, hosted, context_policy)
 	if context_window <= 0:
 		return _result(true, messages, false, 0, original_estimate, 0, 0, 0)
-	var final_reserve := clampi(context_window / 8, 512, 16384)
-	var tool_reserve := clampi(context_window / 10, 512, 8192) if not tools.is_empty() else 0
+	var final_reserve := hosted_output_tokens if hosted else clampi(context_window / 8, 512, 16384)
+	var tool_reserve := clampi(context_window / (32 if hosted else 10), 512, 8192) if not tools.is_empty() else 0
 	var input_budget := context_window - final_reserve - tool_reserve
 	if input_budget <= 0:
 		return _result(false, messages, false, 0, original_estimate, input_budget, final_reserve, tool_reserve, "The selected model's context window is too small for Orca's response reserves.")
@@ -35,7 +37,7 @@ static func prepare(messages: Array, tools: Array, context_window: int) -> Dicti
 			candidate.remove_at(index)
 		if not marker_present:
 			candidate.insert(1, {"role": "system", "content": COMPACTION_NOTICE})
-		var estimate := estimate_tokens(candidate, tools)
+		var estimate := estimate_tokens(candidate, tools, include_history_images, hosted, context_policy)
 		if estimate <= input_budget:
 			var inserted_count := 0 if marker_present else 1
 			var result := _result(true, candidate, true, dropped_turns, estimate, input_budget, final_reserve, tool_reserve)
@@ -47,17 +49,27 @@ static func prepare(messages: Array, tools: Array, context_window: int) -> Dicti
 	return _result(false, messages, false, 0, original_estimate, input_budget, final_reserve, tool_reserve, "The system prompt, tools, and current turn exceed the selected model's safe input budget. Shorten the prompt or choose a model with a larger context window.")
 
 
-static func estimate_tokens(messages: Array, tools: Array) -> int:
-	var text_messages := messages.duplicate(true)
+static func estimate_tokens(messages: Array, tools: Array, include_history_images: bool = true, hosted: bool = false, context_policy: Dictionary = {}) -> int:
+	var text_messages := ImageAttachments.project_messages(ScriptReferences.request_messages(messages), include_history_images)
 	var image_tokens := 0
+	var opaque_tokens := 0
 	for message in text_messages:
 		if typeof(message) != TYPE_DICTIONARY:
 			continue
 		for image in message.get("images", []):
-			image_tokens += ImageAttachments.image_token_reserve(image)
+			image_tokens += int(context_policy.get("image_tokens", 16384)) if hosted else ImageAttachments.image_token_reserve(image)
 		message.erase("images")
+		if hosted and context_policy.get("opaque_reasoning_bytes") == true and message.has("reasoning_content"):
+			var packet := JSON.stringify({"reasoning_content": message["reasoning_content"]})
+			opaque_tokens += packet.to_utf8_buffer().size() + packet.count(":") + packet.count(",")
+			message.erase("reasoning_content")
 	var serialized := JSON.stringify({"messages": text_messages, "tools": tools})
 	var byte_count := serialized.to_utf8_buffer().size()
+	if hosted:
+		# Match the gateway's contextual estimate, not its separate byte-upper-bound
+		# billing reservation. Opaque Responses continuation retains full byte cost.
+		var contextual_bytes := byte_count + serialized.count(":") + serialized.count(",")
+		return image_tokens + opaque_tokens + ceili(float(contextual_bytes) / 3.0) + messages.size() * 32 + tools.size() * 64
 	return image_tokens + ceili(float(byte_count) / TOKEN_BYTES) + messages.size() * MESSAGE_OVERHEAD_TOKENS + tools.size() * TOOL_OVERHEAD_TOKENS
 
 

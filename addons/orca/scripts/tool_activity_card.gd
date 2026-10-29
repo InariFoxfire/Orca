@@ -149,6 +149,8 @@ func _display_name(tool_name: String) -> String:
 			return "Search project"
 		"inspect_scene":
 			return "Inspect scene"
+		"inspect_editor_scene":
+			return "Inspect live scene"
 		"inspect_project_settings":
 			return "Inspect project settings"
 		"read_project_skill":
@@ -192,6 +194,9 @@ func _display_name(tool_name: String) -> String:
 
 
 func _target_from_arguments(arguments: Dictionary) -> String:
+	if _tool_name == "inspect_editor_scene":
+		var scope := str(arguments.get("scope", "selection"))
+		return "Selected nodes" if scope == "selection" else (str(arguments.get("node_path", ".")) if scope == "subtree" else "Scene hierarchy")
 	if _tool_name == "read_project_skill":
 		return str(arguments.get("name", ""))
 	if _tool_name == "inspect_godot_api":

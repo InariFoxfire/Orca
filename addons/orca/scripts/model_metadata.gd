@@ -94,6 +94,8 @@ static func metadata_from_catalog(catalog, provider: String, model: String) -> D
 
 
 static func infer_provider(api_url: String, model: String = "") -> String:
+	if api_url == preload("res://addons/orca/scripts/providers/orca_cloud_provider.gd").BASE_URL:
+		return "orca_cloud"
 	var normalized_url := api_url.strip_edges().to_lower()
 	var authority := normalized_url.get_slice("://", 1) if "://" in normalized_url else normalized_url
 	var host := authority.get_slice("/", 0).get_slice(":", 0)

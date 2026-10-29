@@ -35,12 +35,15 @@ func _run() -> void:
 	_expect(view.system_scroll.visible and not view.settings_scroll.visible and not view.about_scroll.visible, "System should replace the other sections")
 	_expect(view.system_tab_button.button_pressed and not view.provider_tab_button.button_pressed and not view.about_tab_button.button_pressed, "only System should be selected")
 	_expect(view.language_selector.item_count == 1 and view.language_selector.get_item_text(0) == "English" and view.language_selector.selected == 0 and view.language_selector.disabled, "language should display English without offering unsupported choices")
+	_expect(view.system_scroll.is_ancestor_of(view.update_panel) and view.update_panel.get_parent() == view.language_selector.get_parent() and view.update_panel.get_index() > view.language_selector.get_index(), "General Settings should own plugin updates below Language")
+	_expect(view.find_children("PluginUpdates", "", true, false).size() == 1, "Settings should create exactly one update card")
 	_expect(view.get_combined_minimum_size().x <= 300.0, "System should fit the 300 px dock width")
 	view.about_tab_button.emit_signal("pressed")
 	await process_frame
 	_expect(not view.settings_scroll.visible and not view.system_scroll.visible and view.about_scroll.visible, "the About tab should replace other settings")
 	_expect(view.about_tab_button.button_pressed, "the About tab should show its selected state")
-	_expect(view.about_version_label.text == "Version 1.3.0", "the About page should read the release version from plugin.cfg")
+	_expect(not view.about_scroll.is_ancestor_of(view.update_panel), "About should not contain update controls")
+	_expect(view.about_version_label.text == "Version 1.4.0", "the About page should read the release version from plugin.cfg")
 	var compatibility := view.find_child("AboutCompatibility", true, false) as Label
 	var license := view.find_child("AboutLicense", true, false) as Label
 	var logo := view.find_child("AboutLogo", true, false) as TextureRect
@@ -65,7 +68,7 @@ func _run() -> void:
 			_expect(connections.size() == 1 and connections[0]["callable"].get_bound_arguments() == [link[1]], "each About action should open its exact static URL only on click")
 	view.set_support_request_metadata({"provider_type": "openai", "outcome": "failed", "interaction_mode": "work", "stage": "initial", "tools_offered": true, "failure_category": "timeout", "transport_phase": "receiving_response", "message": "PRIVATE_ERROR_SENTINEL", "base_url": "https://private.example"})
 	var report_text: String = view.diagnostic_report_text()
-	_expect(report_text.contains("\"orca_version\": \"1.3.0\"") and report_text.contains("\"failure_category\": \"timeout\""), "the About action should generate versioned coarse request diagnostics")
+	_expect(report_text.contains("\"orca_version\": \"1.4.0\"") and report_text.contains("\"failure_category\": \"timeout\""), "the About action should generate versioned coarse request diagnostics")
 	_expect(not report_text.contains("PRIVATE_ERROR_SENTINEL") and not report_text.contains("private.example"), "the About report must not serialize unknown request or endpoint fields")
 	view._on_copy_support_report_pressed()
 	_expect(view.support_report_status.text == "Copied diagnostic report.", "copying diagnostics should provide visible confirmation")
@@ -93,10 +96,23 @@ func _run() -> void:
 	_expect(view.agent_probe_button.visible and view.agent_enable_toggle.visible, "editable providers should expose compatibility controls")
 	_expect(view.agent_enable_toggle.disabled and not view.agent_enable_toggle.button_pressed, "Agent opt-in should remain disabled before a matching probe pass")
 	_expect(view._agent_probe != null and not view._agent_probe.is_running(), "compatibility probing must never start automatically")
-	for provider_id in ["ollama", "lmstudio", "local_openai", "custom"]:
+	_expect(view.agent_probe_button.text == "Test & Enable Agent tools" and view.agent_probe_button.tooltip_text.contains("only if it passes"), "the explicit check action should disclose automatic enablement on success")
+	_expect(view.agent_warning_label.text.contains("enables Agent tools when it passes"), "the existing help should explain the combined action")
+	for provider_id in ["ollama", "lmstudio", "local_openai", "custom", "azure"]:
 		view._load_provider(provider_id)
 		await process_frame
 		_expect(view.get_combined_minimum_size().x <= 300.0, provider_id + " settings should fit the 300 px dock with editable-endpoint controls visible")
+	view._load_provider("azure")
+	_expect(view.api_mode_selector.visible and view._selected_api_mode == "responses" and view.custom_model_input.placeholder_text.contains("deployment"), "Foundry should default to Responses and exact deployment names")
+	_expect(view.continuation_selector.visible and view.continuation_selector.tooltip_text.contains("Chat or Responses"), "DeepSeek compatibility must be explicitly available for both Azure protocols")
+	_expect(view.effort_selector.visible and view._current_form_config().get("api_mode") == "responses", "manual Azure deployments should expose explicit reasoning settings")
+	view._on_api_mode_selected(1)
+	view._on_continuation_selected(1)
+	_expect(view.continuation_selector.visible and view._current_form_config().get("continuation_style") == "deepseek" and view._current_form_config().get("api_mode") == "chat_completions", "Azure Chat should permit explicit DeepSeek continuation")
+	view._set_efforts([], "none")
+	_expect(view._current_form_config().get("reasoning_effort") == "none", "explicit None must survive manual-model refresh and probe snapshots")
+	view._on_manual_model_changed("custom-deployment-name")
+	_expect(view._selected_effort == "none" and view._selected_api_mode == "chat_completions" and view._continuation_style == "deepseek", "editing deployment names must preserve explicit request options")
 	view._load_provider("ollama")
 	view.custom_model_input.text = "manual-embed-model"
 	view._on_manual_model_changed("manual-embed-model")

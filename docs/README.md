@@ -56,3 +56,9 @@ addons/orca/
 ```
 
 Do not include `docs/`, tests, GitHub workflow files, local Godot caches, or other repository-level files in the plugin archive.
+
+Use `scripts/package_release.py` for updater-equipped ZIPs. The native Actions
+workflow builds/tests four platform helpers and supplies a complete test ZIP plus
+a helper bundle. Commit-based Asset Library snapshots also need those binaries and
+their generated manifest in the selected commit. Exact local/manual/Actions steps:
+[Plugin release and Asset Library packaging](UPDATES.md#builds-and-downloads-from-github-actions).

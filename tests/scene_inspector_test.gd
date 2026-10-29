@@ -14,6 +14,7 @@ func _init() -> void:
 func _run() -> void:
 	_test_complete_inspection()
 	_test_bounds_and_structure_only()
+	_test_json_numeric_limits()
 	_test_variant_summaries()
 	_test_rejections()
 	_finish()
@@ -23,6 +24,9 @@ func _test_complete_inspection() -> void:
 	var result: Dictionary = Tools.execute_tool("inspect_scene", {"scene_path": FIXTURE})
 	_expect(result.get("success", false), "a valid saved scene should be inspectable")
 	var content := str(result.get("content", ""))
+	var model_content := str(result.get("model_content", ""))
+	_expect(not model_content.is_empty() and model_content.to_utf8_buffer().size() < content.to_utf8_buffer().size(), "scene model output must avoid review-only indentation")
+	_expect(JSON.parse_string(model_content) == JSON.parse_string(content), "compact scene output must retain every report value")
 	_expect(content.to_utf8_buffer().size() <= SceneInspector.MAX_OUTPUT_BYTES, "scene output must remain within its byte limit")
 	var report = JSON.parse_string(content)
 	_expect(report is Dictionary, "scene output should be valid JSON")
@@ -70,6 +74,23 @@ func _test_variant_summaries() -> void:
 	var deep = [[[[[1]]]]]
 	var deep_summary = SceneInspector._summarize_variant(deep, 0)
 	_expect(JSON.stringify(deep_summary).contains("depth_limit"), "recursive summaries should stop at the depth limit")
+
+
+func _test_json_numeric_limits() -> void:
+	var arguments = JSON.parse_string('{"scene_path":"%s","max_nodes":2,"max_properties_per_node":1}' % FIXTURE)
+	var result := Tools.execute_tool("inspect_scene", arguments)
+	_expect(result.get("success", false), "integer limits decoded from real tool-call JSON must not reject a saved scene")
+	var report = JSON.parse_string(str(result.get("content", ""))) if result.get("success", false) else null
+	if report is Dictionary:
+		_expect(report.get("returned_node_count") == 2, "decoded integer node limit must be enforced")
+		for node in report.get("nodes", []):
+			_expect(node.get("returned_property_count", 0) <= 1, "decoded integer property limit must be enforced")
+	for value in [true, "2", 2.5, NAN, INF, -INF]:
+		for field in ["max_nodes", "max_properties_per_node"]:
+			var invalid := {"scene_path": FIXTURE, field: value}
+			_expect(not Tools.execute_tool("inspect_scene", invalid).get("success", true), "non-integer scene limits must fail before resource inspection")
+	var huge := Tools.execute_tool("inspect_scene", {"scene_path": FIXTURE, "max_nodes": 1e100, "max_properties_per_node": -1e100})
+	_expect(huge.get("success", false) and JSON.parse_string(huge["content"]).get("returned_node_count") == 5, "huge finite integral limits must clamp before integer conversion")
 
 
 func _test_rejections() -> void:

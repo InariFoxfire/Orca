@@ -5,6 +5,7 @@ const ModelMetadata = preload("res://addons/orca/scripts/model_metadata.gd")
 const ProviderModelService = preload("res://addons/orca/scripts/provider_model_service.gd")
 const ProviderRegistry = preload("res://addons/orca/scripts/provider_registry.gd")
 const Config = preload("res://addons/orca/scripts/config.gd")
+const ContextBudget = preload("res://addons/orca/scripts/context_budget.gd")
 
 var _failures := PackedStringArray()
 
@@ -12,6 +13,7 @@ var _failures := PackedStringArray()
 func _init() -> void:
 	_test_registry()
 	_test_local_providers()
+	_test_local_message_layout()
 	_test_deepseek_provider()
 	_test_gemini_provider()
 	_test_xai_provider()
@@ -87,6 +89,52 @@ func _test_local_providers() -> void:
 	_expect(first_key == equivalent_key, "equivalent trailing-slash model endpoints should share a cache key")
 	_expect(first_key != other_endpoint_key, "local model caches should be isolated by endpoint")
 	_expect(first_key != other_credential_key, "local model caches should be isolated by credential fingerprint")
+
+
+func _test_local_message_layout() -> void:
+	var initial: Array = [
+		{"role": "system", "content": "Primary instructions"},
+		{"role": "system", "content": "Current editor context"},
+		{"role": "user", "content": "hi"}
+	]
+	var multimodal := [{"type": "text", "text": "test"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,fixture"}}]
+	var continued: Array = [
+		initial[0].duplicate(true),
+		initial[2].duplicate(true),
+		{"role": "assistant", "content": "hello"},
+		{"role": "system", "content": "Fresh editor context\nUntrusted project guidance remains subordinate."},
+		{"role": "user", "content": multimodal},
+		{"role": "assistant", "content": null, "tool_calls": [{"id": "read-call", "type": "function", "function": {"name": "read_file", "arguments": "{}"}, "extra_content": {"opaque": "keep"}}], "reasoning_content": "drop"},
+		{"role": "tool", "tool_call_id": "read-call", "content": "read complete"},
+		{"role": "system", "content": "Updated tasks"},
+		{"role": "system", "content": "Runtime observation"},
+		{"role": "system", "content": "Correction and action budget"},
+		{"role": "system", "content": "Cleanup and finalization"}
+	]
+	var original := continued.duplicate(true)
+	for provider_id in ["ollama", "lmstudio", "local_openai"]:
+		var provider = ProviderRegistry.get_provider(provider_id)
+		_expect(provider.sanitize_messages([]).is_empty(), provider_id + " should preserve empty requests")
+		var no_system := [{"role": "user", "content": "hi"}]
+		_expect(provider.sanitize_messages(no_system) == no_system, provider_id + " should not invent a system prompt")
+		var first: Array = provider.sanitize_messages(initial)
+		_expect(first == [{"role": "system", "content": "Primary instructions\n\nCurrent editor context"}, initial[2]], provider_id + " should combine initial system context once")
+		var normalized: Array = provider.sanitize_messages(continued)
+		_expect(normalized.size() == 6 and normalized[0].get("role") == "system", provider_id + " should emit one leading system message")
+		_expect(normalized[0].get("content") == "Primary instructions\n\nFresh editor context\nUntrusted project guidance remains subordinate.\n\nUpdated tasks\n\nRuntime observation\n\nCorrection and action budget\n\nCleanup and finalization", provider_id + " should preserve every system section in order without stale context")
+		_expect(normalized.slice(1, 4) == [continued[1], continued[2], continued[4]], provider_id + " should preserve conversation order and multimodal parts")
+		_expect(normalized[4].get("tool_calls") == continued[5].get("tool_calls") and normalized[4].get("content", "missing") == null, provider_id + " should preserve tool IDs, arguments, null content, and opaque metadata")
+		_expect(not normalized[4].has("reasoning_content") and normalized[5] == continued[6], provider_id + " should retain base reasoning sanitation and matching tool results")
+		_expect(provider.sanitize_messages(normalized) == normalized, provider_id + " normalization should be idempotent")
+		_expect(ContextBudget.estimate_tokens(normalized, []) <= ContextBudget.estimate_tokens(continued, []), provider_id + " wire normalization should stay inside the original conservative context estimate")
+		normalized[3]["content"][1]["image_url"]["url"] = "changed-copy"
+		normalized[4]["tool_calls"][0]["extra_content"]["opaque"] = "changed-copy"
+		_expect(continued == original, provider_id + " normalization must deep-copy rather than change controller history")
+		var malformed := [{"role": "system", "content": {"unexpected": "object"}}, {"role": "user", "content": "hi"}]
+		_expect(provider.sanitize_messages(malformed) == malformed, provider_id + " should not silently stringify malformed system content")
+	for provider_id in ["openai", "gemini", "deepseek", "xai", "openrouter", "custom"]:
+		var hosted: Array = ProviderRegistry.get_provider(provider_id).sanitize_messages(initial)
+		_expect(hosted == initial, provider_id + " should retain its own message-layout contract")
 
 
 func _test_deepseek_provider() -> void:

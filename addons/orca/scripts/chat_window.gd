@@ -20,10 +20,15 @@ const SettingsView = preload("res://addons/orca/scripts/settings_view.gd")
 const SessionStore = preload("res://addons/orca/scripts/session_store.gd")
 const HistoryView = preload("res://addons/orca/scripts/history_view.gd")
 const UiMetrics = preload("res://addons/orca/scripts/ui_metrics.gd")
+const ResponseAttribution = preload("res://addons/orca/scripts/response_attribution.gd")
 const ImageAttachments = preload("res://addons/orca/scripts/image_attachments.gd")
 const ImageCapability = preload("res://addons/orca/scripts/image_capability.gd")
 const ImageAttachmentTray = preload("res://addons/orca/scripts/image_attachment_tray.gd")
 const ImageAttachmentWindow = preload("res://addons/orca/scripts/image_attachment_window.gd")
+const ScriptReferences = preload("res://addons/orca/scripts/script_references.gd")
+const ScriptReferenceTray = preload("res://addons/orca/scripts/script_reference_tray.gd")
+const UpdatePanel = preload("res://addons/orca/scripts/update_panel.gd")
+const ConnectionSetupPanel = preload("res://addons/orca/scripts/connection_setup_panel.gd")
 const PROMPT_MIN_LINES := 2
 const PROMPT_MAX_LINES := 7
 const PROMPT_MAX_DOCK_RATIO := 0.28
@@ -38,6 +43,7 @@ const GROUPABLE_TOOL_NAMES := {
 	"read_file": true,
 	"search_files": true,
 	"inspect_scene": true,
+	"inspect_editor_scene": true,
 	"inspect_project_settings": true,
 	"read_project_skill": true,
 	"inspect_godot_api": true,
@@ -95,6 +101,9 @@ const GROUPABLE_TOOL_NAMES := {
 var agent_controller
 var settings_view
 var diagnostics_service
+var account_service
+var update_service
+var update_notice
 var game_process_service
 var model_catalog_service
 var session_store
@@ -105,6 +114,7 @@ var _stop_icon: Texture2D
 var _build_mode_icon: Texture2D
 var _plan_mode_icon: Texture2D
 var _stream_label: RichTextLabel
+var _response_attribution: Dictionary = {}
 var _stream_content := ""
 var _transient_card: Control
 var _working_timer: Timer
@@ -136,6 +146,8 @@ var _request_active := false
 var _active_turn_id := 0
 var _scroll_follow_frames := 0
 var _draft_images: Array = []
+var _draft_script_paths: Array = []
+var _script_reference_tray: PanelContainer
 var _attachment_tray: PanelContainer
 var _image_picker: FileDialog
 var _image_preview: AcceptDialog
@@ -145,6 +157,13 @@ var _image_drop_cue: PanelContainer
 var _image_drop_timer: Timer
 var _image_attachment_window: Window
 var _image_attachment_session_id := ""
+var _connection_setup_card: PanelContainer
+var _connection_overlay: Control
+var _connection_overlay_scroll: ScrollContainer
+var _connection_dock_open_notified := false
+var _connection_first_open_pending := false
+var _connection_first_open_checked := false
+var _connection_setup_first_open := false
 
 
 func _ready() -> void:
@@ -166,6 +185,14 @@ func _ready() -> void:
 	_meta_font_size = maxi(editor_font_size, 11)
 	_apply_scaled_geometry()
 	_setup_visual_theme(editor_theme)
+	if update_service != null:
+		update_notice = UpdatePanel.new()
+		update_notice.name = "UpdateNotice"
+		update_notice.compact = true
+		update_notice.service = update_service
+		var column := chat_scroll.get_parent()
+		column.add_child(update_notice)
+		column.move_child(update_notice, chat_scroll.get_index())
 	_setup_image_attachments()
 	task_list_panel = TaskListPanel.new()
 	var main_column := chat_scroll.get_parent()
@@ -196,6 +223,12 @@ func _ready() -> void:
 
 	agent_controller = AgentController.new()
 	add_child(agent_controller)
+	if account_service == null:
+		account_service = preload("res://addons/orca/scripts/account_service.gd").new()
+		add_child(account_service)
+	agent_controller.account_service = account_service
+	agent_controller.api_client.account_service = account_service
+	account_service.changed.connect(_on_account_state_changed)
 	if diagnostics_service == null:
 		diagnostics_service = DiagnosticsService.new()
 		add_child(diagnostics_service)
@@ -225,10 +258,13 @@ func _ready() -> void:
 	_setup_mode_menu()
 
 	settings_view = SettingsView.new()
+	settings_view.account_service = account_service
+	settings_view.update_service = update_service
 	settings_view.hide()
 	add_child(settings_view)
 	settings_view.done_requested.connect(_on_settings_done)
 	settings_view.settings_saved.connect(_on_settings_saved)
+	_setup_connection_overlay()
 	session_store = SessionStore.new()
 	history_view = HistoryView.new()
 	history_view.hide()
@@ -268,6 +304,18 @@ func _exit_tree() -> void:
 	_close_image_attachment_window()
 	if session_store != null and not _session.is_empty() and _has_session_content:
 		_save_current_session()
+
+
+func update_readiness() -> String:
+	if agent_controller != null and (agent_controller.is_busy() or not agent_controller._pending_change_id.is_empty() or not agent_controller._pending_work_mode_call_id.is_empty()):
+		return "Finish or cancel the active Orca request and approvals before updating."
+	if not prompt_input.text.strip_edges().is_empty() or not _draft_images.is_empty() or not _draft_script_paths.is_empty():
+		return "Submit or clear the composer draft before restarting so it is not lost."
+	return ""
+
+
+func save_for_update() -> bool:
+	return update_readiness().is_empty() and _save_current_session()
 
 
 func _notification(what: int) -> void:
@@ -411,6 +459,12 @@ func _setup_image_attachments() -> void:
 	_attachment_tray.remove_requested.connect(_remove_draft_image)
 	_attachment_tray.preview_requested.connect(_show_image_preview)
 	_attachment_tray.hide()
+	_script_reference_tray = ScriptReferenceTray.new()
+	_script_reference_tray.name = "ScriptReferenceTray"
+	overlay_host.add_child(_script_reference_tray)
+	_script_reference_tray.remove_requested.connect(_remove_script_reference)
+	_script_reference_tray.open_requested.connect(_open_script_reference)
+	_script_reference_tray.hide()
 	_setup_image_intake(overlay_host)
 	composer.resized.connect(_position_attachment_tray)
 	composer.item_rect_changed.connect(_position_attachment_tray)
@@ -477,6 +531,8 @@ func _image_intake_error(count: int) -> String:
 
 
 func _selected_image_capability() -> String:
+	if Config.get_provider() == "orca_cloud" and account_service != null:
+		return ImageCapability.resolve(account_service.profile_config(Config.get_model(), Config.get_reasoning_effort()))
 	return ImageCapability.resolve(Config.get_active_provider_config())
 
 
@@ -607,7 +663,11 @@ func _setup_image_intake(overlay_host: Control) -> void:
 func _can_drop_image_data(_position: Vector2, data, target: Control) -> bool:
 	var paths := _image_paths_from_drag(data)
 	var accepted := target.is_visible_in_tree() and not paths.is_empty() and _image_intake_error(paths.size()).is_empty() and get_last_exclusive_window() == get_window()
+	if not accepted:
+		var scripts := _script_paths_from_drag(data)
+		accepted = target.is_visible_in_tree() and not scripts.is_empty() and _script_intake_error(scripts).is_empty() and get_last_exclusive_window() == get_window()
 	if accepted:
+		(_image_drop_cue.get_child(0) as Label).text = "Drop images to attach" if not paths.is_empty() else "Drop scripts to attach"
 		_image_drop_cue.size = prompt_input.size
 		_image_drop_cue.global_position = prompt_input.global_position
 		_image_drop_cue.show()
@@ -624,6 +684,99 @@ func _drop_image_data(_position: Vector2, data, _target: Control) -> void:
 	var paths := _image_paths_from_drag(data)
 	if not paths.is_empty():
 		_attach_image_files(paths)
+	else:
+		var scripts := _script_paths_from_drag(data)
+		if not scripts.is_empty():
+			_attach_script_paths(scripts)
+
+
+func _script_paths_from_drag(data) -> Array:
+	if typeof(data) != TYPE_DICTIONARY:
+		return []
+	var paths: Array = []
+	if data.get("type") == "script_list_element":
+		var path := _current_script_drag_path(data.get("script_list_element"))
+		if not path.is_empty():
+			paths.append(path)
+	elif data.get("type") in ["files", "files_and_dirs"]:
+		var files = data.get("files")
+		if typeof(files) not in [TYPE_ARRAY, TYPE_PACKED_STRING_ARRAY] or files.is_empty() or files.size() > ScriptReferences.MAX_REFERENCES:
+			return []
+		for path in files:
+			if typeof(path) != TYPE_STRING:
+				return []
+			paths.append(path)
+	for path in paths:
+		if not ScriptReferences.path_error(path).is_empty():
+			return []
+	return paths
+
+
+func _current_script_drag_path(element) -> String:
+	# Godot's script-list payload is an editor control, not a resource/path.
+	# Compare identity only; never scrape it or invoke methods on supplied objects.
+	return ScriptReferences.editor_drag_path(element)
+
+
+func _script_intake_error(paths: Array) -> String:
+	if not _session_resumable or not prompt_input.editable or not main_content.is_visible_in_tree():
+		return "This conversation is not accepting script references."
+	var unique := _draft_script_paths.duplicate()
+	for path in paths:
+		if path not in unique:
+			unique.append(path)
+	if unique.size() > ScriptReferences.MAX_REFERENCES:
+		return "Attach at most four scripts per message."
+	return ""
+
+
+func _attach_script_paths(paths: Array) -> bool:
+	var error := _script_intake_error(paths)
+	if paths.is_empty() or paths.size() > ScriptReferences.MAX_REFERENCES:
+		error = "Attach at most four project scripts."
+	if error.is_empty():
+		for path in paths:
+			error = ScriptReferences.path_error(path, true) if typeof(path) == TYPE_STRING else "Invalid script reference."
+			if not error.is_empty():
+				break
+	if not error.is_empty():
+		_show_image_intake_error(error)
+		return false
+	for path in paths:
+		if path not in _draft_script_paths:
+			_draft_script_paths.append(path)
+	_refresh_script_reference_tray()
+	return true
+
+
+func _prepare_script_references() -> Dictionary:
+	return ScriptReferences.prepare(_draft_script_paths)
+
+
+func _remove_script_reference(index: int) -> void:
+	if index >= 0 and index < _draft_script_paths.size():
+		_draft_script_paths.remove_at(index)
+	_refresh_script_reference_tray()
+
+
+func _open_script_reference(path: String) -> void:
+	var error := ScriptReferences.path_error(path, true)
+	if error.is_empty():
+		if not EditorContext.open_file(path):
+			_show_image_intake_error("The referenced script could not be opened.")
+	else:
+		_show_image_intake_error(error)
+
+
+func _refresh_script_reference_tray() -> void:
+	if _script_reference_tray == null:
+		return
+	var records: Array = []
+	for path in _draft_script_paths:
+		records.append({"filepath": path})
+	_script_reference_tray.configure(records)
+	call_deferred("_position_attachment_tray")
+	_sync_send_availability()
 
 
 func _hide_image_drop_cue() -> void:
@@ -697,6 +850,11 @@ func _position_attachment_tray() -> void:
 	if task_list_panel != null and task_list_panel.visible:
 		anchor.y = minf(anchor.y, task_list_panel.global_position.y)
 	_attachment_tray.global_position = anchor - Vector2(0, UiMetrics.scaled(68))
+	if _script_reference_tray != null and not _draft_script_paths.is_empty():
+		if not _draft_images.is_empty():
+			anchor.y -= UiMetrics.scaled(68)
+		_script_reference_tray.size = Vector2(composer.size.x, _script_reference_tray.height_for_width(composer.size.x))
+		_script_reference_tray.global_position = anchor - Vector2(0, _script_reference_tray.size.y + UiMetrics.scaled(4))
 
 
 func _show_image_preview(record: Dictionary) -> void:
@@ -720,8 +878,25 @@ func _add_message_images(label: RichTextLabel, images: Array) -> void:
 	tray.preview_requested.connect(_show_image_preview)
 
 
+func _add_message_script_references(label: RichTextLabel, references: Array) -> void:
+	if references.is_empty():
+		return
+	var parent := label.get_parent()
+	if parent is PanelContainer:
+		parent.remove_child(label)
+		var content := VBoxContainer.new()
+		content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		parent.add_child(content)
+		content.add_child(label)
+		parent = content
+	var tray := ScriptReferenceTray.new()
+	parent.add_child(tray)
+	tray.configure(references, false)
+	tray.open_requested.connect(_open_script_reference)
+
+
 func _sync_send_availability() -> void:
-	send_button.disabled = not _request_active and (not _session_resumable or (prompt_input.text.strip_edges().is_empty() and _draft_images.is_empty()))
+	send_button.disabled = not _request_active and (not _session_resumable or (prompt_input.text.strip_edges().is_empty() and _draft_images.is_empty() and _draft_script_paths.is_empty()))
 	_sync_image_button(_selected_image_capability())
 	_sync_send_icon_tint(_request_active)
 
@@ -740,6 +915,8 @@ func _sync_image_button(capability: String) -> void:
 		image_button.tooltip_text = "Four images attached. Remove an image to add another."
 	else:
 		image_button.tooltip_text = "%s supports image input. Opens a separate drop/Browse window. Paste screenshots or drag project images onto the input. Dropping desktop files on the main editor imports them; use the attachment window instead." % Config.get_model()
+	if _session_resumable and capability != "supported" and agent_controller != null and ImageAttachments.has_images(agent_controller.message_history):
+		image_button.tooltip_text += "\nPrevious session images are preserved. Text follow-ups send placeholders and any earlier descriptions instead of image pixels."
 
 
 func _sync_send_icon_tint(request_active: bool) -> void:
@@ -774,6 +951,16 @@ func _clear_prompt_input() -> void:
 
 
 func _on_prompt_gui_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and event.keycode == KEY_TAB:
+		if event.shift_pressed or event.ctrl_pressed or event.alt_pressed or event.meta_pressed or not prompt_input.has_focus() or not prompt_input.is_visible_in_tree():
+			return
+		# Consume repeats and locked-state presses too, without inserting draft tabs.
+		prompt_input.accept_event()
+		if event.echo or _request_active or not _session_resumable or mode_button.disabled or agent_controller == null:
+			return
+		var next_mode := AgentController.AgentMode.PLAN if agent_controller.get_mode() == AgentController.AgentMode.BUILD else AgentController.AgentMode.BUILD
+		_on_mode_selected(next_mode, true)
+		return
 	if event is InputEventKey and event.pressed and (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER):
 		if event.shift_pressed or _request_active:
 			return
@@ -789,27 +976,40 @@ func _on_send_button_pressed() -> void:
 	if not _session_resumable:
 		return
 	var text := prompt_input.text.strip_edges()
-	if text.is_empty() and _draft_images.is_empty():
+	if text.is_empty() and _draft_images.is_empty() and _draft_script_paths.is_empty():
 		return
-	var attachment_error: String = agent_controller.submission_error(_draft_images)
+	var setup: Dictionary = agent_controller.connection_setup()
+	if setup.get("status") != "ready":
+		_show_connection_setup(setup)
+		return
+	_dismiss_connection_setup(false)
+	var prepared := _prepare_script_references()
+	if not prepared.get("success", false):
+		_show_image_intake_error(str(prepared.get("error", "Could not prepare script references.")))
+		return
+	var references: Array = prepared["references"]
+	var attachment_error: String = agent_controller.submission_error(_draft_images, references)
 	if attachment_error.is_empty():
 		attachment_error = session_store.image_storage_error(_session, _draft_images)
 	if not attachment_error.is_empty():
 		_add_message("Attachments", attachment_error, Color.INDIAN_RED, "error")
 		return
 	var images := _draft_images.duplicate(true)
+	var script_paths := _draft_script_paths.duplicate()
 	var previous_session := _session.duplicate(true)
-	_submitted_image_draft = {"text": text, "images": images} if not images.is_empty() else {}
+	_submitted_image_draft = {"text": text, "images": images, "script_paths": script_paths} if not images.is_empty() or not script_paths.is_empty() else {}
 	_clear_prompt_input()
 	prompt_input.placeholder_text = "Describe what you want to build or fix..."
 	_has_session_content = true
 	_sync_metrics_visibility()
 	var user_label := _add_message("User", text, Color.LIGHT_SKY_BLUE, "user")
 	_add_message_images(user_label, images)
+	_add_message_script_references(user_label, references)
+	var user_panel := _response_panel(user_label)
 	_ensure_session()
 	if str(_session.get("last_prompt", "")).is_empty():
-		_session["title"] = _session_title(text)
-	_session["last_prompt"] = text.left(240)
+		_session["title"] = _session_title(text if not text.is_empty() or script_paths.is_empty() else script_paths[0].get_file())
+	_session["last_prompt"] = (text if not text.is_empty() or script_paths.is_empty() else script_paths[0].get_file()).left(240)
 	_session["mode"] = agent_controller.get_mode()
 	_session["provider"] = Config.get_provider()
 	_session["model"] = Config.get_model()
@@ -820,19 +1020,24 @@ func _on_send_button_pressed() -> void:
 	var event := _message_event("User", text, "user", "complete")
 	if not images.is_empty():
 		event["images"] = images
+	if not references.is_empty():
+		event["script_references"] = references
 	_append_session_event(event)
 	_set_request_active(true)
 	_show_working_indicator("Thinking")
 	_draft_images.clear()
+	_draft_script_paths.clear()
 	_refresh_attachment_tray()
-	if not agent_controller.send_user_message(text, images):
+	_refresh_script_reference_tray()
+	if not agent_controller.send_user_message(text, images, references):
 		_set_request_active(false)
 		_remove_transient_card()
-		if prompt_input.text.is_empty() and _draft_images.is_empty():
+		if prompt_input.text.is_empty() and _draft_images.is_empty() and _draft_script_paths.is_empty():
 			prompt_input.text = text
 			_draft_images = images
+			_draft_script_paths = script_paths
 			_refresh_attachment_tray()
-		var user_panel := user_label.get_parent().get_parent() if not images.is_empty() else user_label.get_parent()
+			_refresh_script_reference_tray()
 		user_panel.queue_free()
 		_session = previous_session
 		_submitted_image_draft.clear()
@@ -846,30 +1051,37 @@ func _on_turn_request_state_changed(turn_id: int, active: bool) -> void:
 		if turn_id <= _active_turn_id:
 			return
 		_active_turn_id = turn_id
+		_response_attribution.clear()
 	elif turn_id != _active_turn_id:
 		return
 	_set_request_active(active)
 
 
-func _on_turn_message_received(turn_id: int, role: String, content: String) -> void:
+func _on_turn_message_received(turn_id: int, role: String, content: String, attribution: Dictionary = {}) -> void:
 	if turn_id != _active_turn_id:
 		return
-	_on_agent_message_received(role, content)
-	_active_turn_id = 0
+	_on_agent_message_received(role, content, attribution)
+	if _active_turn_id == turn_id:
+		_active_turn_id = 0
+		_response_attribution.clear()
 
 
 func _on_turn_error_occurred(turn_id: int, message: String) -> void:
 	if turn_id != _active_turn_id:
 		return
 	_on_agent_error_occurred(message)
-	_active_turn_id = 0
+	if _active_turn_id == turn_id:
+		_active_turn_id = 0
+		_response_attribution.clear()
 
 
 func _on_turn_request_cancelled(turn_id: int) -> void:
 	if turn_id != _active_turn_id:
 		return
 	_on_agent_request_cancelled()
-	_active_turn_id = 0
+	if _active_turn_id == turn_id:
+		_active_turn_id = 0
+		_response_attribution.clear()
 
 
 func _on_turn_message_stream_started(turn_id: int) -> void:
@@ -1014,6 +1226,8 @@ func _on_tasks_changed(tasks: Array) -> void:
 
 
 func _on_workflow_state_changed(state: String, details: Dictionary) -> void:
+	if state in ["thinking", "finalizing"]:
+		_response_attribution = ResponseAttribution.sanitize(details.get("attribution", {}))
 	match state:
 		"thinking":
 			_show_working_indicator("Preparing response" if bool(details.get("follow_up", false)) else "Thinking")
@@ -1164,7 +1378,9 @@ func _on_help_requested(topic: String) -> void:
 	EditorInterface.get_script_editor().goto_help(topic)
 
 
-func _on_agent_message_received(_role: String, content: String) -> void:
+func _on_agent_message_received(_role: String, content: String, attribution: Dictionary = {}) -> void:
+	var response_attribution := ResponseAttribution.sanitize(attribution)
+	var color := _assistant_color_for_mode(response_attribution["mode"]) if not response_attribution.is_empty() else _assistant_color()
 	_submitted_image_draft.clear()
 	_close_active_tool_group()
 	_set_request_active(false)
@@ -1174,13 +1390,13 @@ func _on_agent_message_received(_role: String, content: String) -> void:
 			_stream_label.get_parent().queue_free()
 		else:
 			_stream_content = content
-			_finalize_assistant_message(_stream_label, "Orca", content, _assistant_color())
+			_finalize_assistant_message(_stream_label, "Orca", content, color, response_attribution)
 		_stream_label = null
 		_stream_content = ""
 	elif not content.is_empty():
-		_add_final_assistant_message("Orca", content, _assistant_color())
+		_add_final_assistant_message("Orca", content, color, response_attribution)
 	if not content.is_empty():
-		_append_session_event(_message_event("Orca", content, "assistant", "complete"))
+		_append_session_event(_message_event("Orca", content, "assistant", "complete", response_attribution))
 	_session["clean"] = true
 	_session["resumable"] = not _session_resume_tainted
 	prompt_input.placeholder_text = "Describe what you want to build or fix..."
@@ -1191,10 +1407,12 @@ func _on_agent_message_received(_role: String, content: String) -> void:
 
 
 func _on_agent_error_occurred(message: String) -> void:
-	if not _submitted_image_draft.is_empty() and not _turn_had_tools and not _turn_had_mode_request and _draft_images.is_empty() and prompt_input.text.is_empty():
+	if not _submitted_image_draft.is_empty() and not _turn_had_tools and not _turn_had_mode_request and _draft_images.is_empty() and _draft_script_paths.is_empty() and prompt_input.text.is_empty():
 		prompt_input.text = str(_submitted_image_draft.get("text", ""))
 		_draft_images = _submitted_image_draft.get("images", []).duplicate(true)
+		_draft_script_paths = _submitted_image_draft.get("script_paths", []).duplicate()
 		_refresh_attachment_tray()
+		_refresh_script_reference_tray()
 	_submitted_image_draft.clear()
 	_set_request_active(false)
 	_remove_transient_card()
@@ -1205,11 +1423,12 @@ func _on_agent_error_occurred(message: String) -> void:
 			_stream_label.get_parent().queue_free()
 		else:
 			_update_message_label(_stream_label, "Orca (incomplete)", _stream_content, Color(0.78, 0.64, 0.36))
+			_set_response_footer(_response_panel(_stream_label), _response_attribution)
 	_stream_label = null
 	_stream_content = ""
 	_add_message("Recovery Ready" if recovered else "System Error", message, Color(0.78, 0.64, 0.36) if recovered else Color.INDIAN_RED, "status" if recovered else "error")
 	if not partial_content.is_empty():
-		_append_session_event(_message_event("Orca (incomplete)", partial_content, "assistant", "incomplete"))
+		_append_session_event(_message_event("Orca (incomplete)", partial_content, "assistant", "incomplete", _response_attribution))
 	_append_session_event(_message_event("Recovery Ready" if recovered else "System Error", message, "status" if recovered else "error", "complete"))
 	_session["clean"] = true
 	if _turn_had_tools or _turn_had_mode_request:
@@ -1251,8 +1470,9 @@ func _finish_stream_before_activity() -> void:
 	if _stream_content.is_empty():
 		_stream_label.get_parent().queue_free()
 	else:
-		_finalize_assistant_message(_stream_label, "Orca", _stream_content, _assistant_color())
-		_append_session_event(_message_event("Orca", _stream_content, "assistant", "tool_preface"))
+		var color := _assistant_color_for_mode(_response_attribution["mode"]) if not _response_attribution.is_empty() else _assistant_color()
+		_finalize_assistant_message(_stream_label, "Orca", _stream_content, color, _response_attribution)
+		_append_session_event(_message_event("Orca", _stream_content, "assistant", "tool_preface", _response_attribution))
 	_stream_label = null
 	_stream_content = ""
 
@@ -1261,10 +1481,12 @@ func _on_agent_request_cancelled() -> void:
 	_set_request_active(false)
 	_remove_transient_card()
 	var partial_content := _stream_content
+	if _stream_label != null and is_instance_valid(_stream_label) and not partial_content.is_empty():
+		_set_response_footer(_response_panel(_stream_label), _response_attribution)
 	_stream_label = null
 	_stream_content = ""
 	if not partial_content.is_empty():
-		_append_session_event(_message_event("Orca", partial_content, "assistant", "cancelled"))
+		_append_session_event(_message_event("Orca", partial_content, "assistant", "cancelled", _response_attribution))
 	_add_message("Orca", "Response stopped.", Color(0.5, 0.53, 0.58), "status")
 	_append_session_event(_message_event("Orca", "Response stopped.", "status", "complete"))
 	_session["clean"] = true
@@ -1292,6 +1514,7 @@ func _set_request_active(active: bool) -> void:
 	model_label.disabled = active
 	prompt_input.editable = _session_resumable
 	mode_label.modulate = Color(1, 1, 1, 0.5) if active else Color.WHITE
+	_refresh_connection_setup()
 
 
 func _setup_mode_menu() -> void:
@@ -1326,6 +1549,7 @@ func _setup_mode_menu() -> void:
 func _on_mode_button_pressed() -> void:
 	if not _session_resumable:
 		return
+	_dismiss_connection_setup(false)
 	if mode_overlay.visible:
 		_hide_mode_menu()
 	else:
@@ -1354,13 +1578,16 @@ func _hide_mode_menu() -> void:
 	mode_overlay.hide()
 	mode_button.grab_focus()
 
-func _on_mode_selected(mode: int) -> void:
+func _on_mode_selected(mode: int, keep_prompt_focus: bool = false) -> void:
 	if agent_controller.set_mode(mode):
 		_sync_mode_ui(mode)
 		if not _session.is_empty():
 			_session["mode"] = mode
 			_save_current_session()
-	_hide_mode_menu()
+	if keep_prompt_focus:
+		mode_overlay.hide()
+	else:
+		_hide_mode_menu()
 
 func _sync_mode_ui(mode: int) -> void:
 	var is_build := mode == AgentController.AgentMode.BUILD
@@ -1373,7 +1600,7 @@ func _sync_mode_ui(mode: int) -> void:
 		"Work mode: Explore, run the game, and propose reviewed project changes"
 		if is_build
 		else "Plan mode: Analyze and design without changing files"
-	)
+	) + "\nTab to switch modes in the prompt box"
 	for index in range(_mode_items.size()):
 		var btn := _mode_items[index]
 		var panel := _mode_panels[index]
@@ -1399,6 +1626,7 @@ func _on_settings_saved(_provider_id: String, _model: String) -> void:
 func _on_settings_done() -> void:
 	settings_view.hide()
 	main_content.show()
+	_refresh_connection_setup()
 	prompt_input.grab_focus()
 
 
@@ -1408,10 +1636,21 @@ func _sync_model_ui() -> void:
 	model_label.text = model if not model.is_empty() else "No model"
 	model_label.tooltip_text = "Current model: %s\nClick to configure" % model_label.text
 	_sync_send_availability()
+	_refresh_connection_setup()
 
 
 func _refresh_model_metadata() -> void:
+	if Config.get_provider() == "orca_cloud":
+		return
 	model_catalog_service.refresh(Config.get_model(), Config.get_api_url())
+
+
+func _on_account_state_changed() -> void:
+	_refresh_connection_setup()
+	if Config.get_provider() == "orca_cloud":
+		_sync_model_ui()
+		if not agent_controller.is_busy():
+			agent_controller.refresh_session_usage()
 
 
 func _on_model_metadata_updated() -> void:
@@ -1444,6 +1683,7 @@ func _start_new_session() -> void:
 	_remove_transient_card()
 	_stream_label = null
 	_stream_content = ""
+	_response_attribution.clear()
 	_tool_cards.clear()
 	_change_cards.clear()
 	_tool_event_indices.clear()
@@ -1456,6 +1696,8 @@ func _start_new_session() -> void:
 	_clear_prompt_input()
 	prompt_input.editable = true
 	_draft_images.clear()
+	_draft_script_paths.clear()
+	_refresh_script_reference_tray()
 	_refresh_attachment_tray()
 	_submitted_image_draft.clear()
 	prompt_input.placeholder_text = "Describe what you want to build or fix..."
@@ -1495,7 +1737,10 @@ func _restore_session(session: Dictionary) -> bool:
 		session_store.set_active_session(previous_session_id)
 		return false
 	_session = session.duplicate(true)
+	_response_attribution.clear()
 	_draft_images.clear()
+	_draft_script_paths.clear()
+	_refresh_script_reference_tray()
 	_submitted_image_draft.clear()
 	_refresh_attachment_tray()
 	if task_list_panel != null:
@@ -1613,8 +1858,8 @@ func _append_session_event(event: Dictionary) -> void:
 	_has_session_content = true
 
 
-func _message_event(sender: String, text: String, kind: String, completion: String) -> Dictionary:
-	return {
+func _message_event(sender: String, text: String, kind: String, completion: String, attribution: Dictionary = {}) -> Dictionary:
+	var event := {
 		"type": "message",
 		"timestamp": Time.get_unix_time_from_system(),
 		"sender": sender,
@@ -1623,10 +1868,30 @@ func _message_event(sender: String, text: String, kind: String, completion: Stri
 		"mode": agent_controller.get_mode(),
 		"completion": completion
 	}
+	if kind == "assistant":
+		var response_attribution := ResponseAttribution.sanitize(attribution)
+		if not response_attribution.is_empty():
+			event["attribution"] = response_attribution
+			event["mode"] = response_attribution["mode"]
+	return event
 
 
 func _safe_tool_arguments(arguments: Dictionary, tool_name: String = "") -> Dictionary:
 	var result := {}
+	if tool_name == "inspect_editor_scene":
+		if typeof(arguments.get("scope")) == TYPE_STRING and str(arguments["scope"]) in ["selection", "scene", "subtree"]:
+			result["scope"] = arguments["scope"]
+		for key in ["node_path", "scene_path"]:
+			if typeof(arguments.get(key)) == TYPE_STRING:
+				result[key] = str(arguments[key]).left(512)
+		for bounds in [["max_nodes", 1, 120], ["max_depth", 0, 16], ["max_properties_per_node", 0, 32]]:
+			if typeof(arguments.get(bounds[0])) in [TYPE_INT, TYPE_FLOAT]:
+				var limit := float(arguments[bounds[0]])
+				if is_finite(limit) and limit == floorf(limit):
+					result[bounds[0]] = int(clampf(limit, bounds[1], bounds[2]))
+		if typeof(arguments.get("include_properties")) == TYPE_BOOL:
+			result["include_properties"] = arguments["include_properties"]
+		return result
 	if tool_name == "read_project_skill":
 		if typeof(arguments.get("name")) == TYPE_STRING:
 			result["name"] = str(arguments["name"]).left(128)
@@ -1679,13 +1944,25 @@ func _update_tool_event(call_id: String, execution: Dictionary, duration_ms: int
 	event["outcome"] = outcome
 	event["duration_ms"] = duration_ms
 	var data: Dictionary = execution.get("data", {})
-	if str(event.get("name", "")) == "verify_game_run" and outcome == "completed":
+	if str(event.get("name", "")) == "inspect_editor_scene":
+		if outcome == "completed":
+			var node_count := clampi(int(data.get("returned_node_count", 0)), 0, 120)
+			var state_label := " with unsaved changes" if data.get("unsaved_changes", false) else ""
+			var truncation_label := " (truncated)" if data.get("truncated", false) else ""
+			event["summary"] = "Historical live-editor inspection: %d node(s)%s%s. Inspect again for current state." % [node_count, state_label, truncation_label]
+		else:
+			event["summary"] = "Live editor inspection did not complete."
+	elif str(event.get("name", "")) == "verify_game_run" and outcome == "completed":
 		event["summary"] = "Verification %s." % str(data.get("status", "unverified")).replace("_", " ")
 	elif str(event.get("name", "")) in ["run_current_scene", "run_main_scene", "stop_game"] and outcome == "completed":
 		event["summary"] = "Game process: " + str(data.get("state", "updated")).replace("_", " ")
 	else:
-		if outcome in ["failed", "apply_recovery_required", "revert_recovery_required", "conflict"]:
+		if outcome in ["apply_recovery_required", "revert_recovery_required"]:
 			event["summary"] = "Recovery required. See the associated change record."
+		elif outcome in ["failed", "conflict"]:
+			event["summary"] = "Tool did not complete."
+		elif outcome == "cancelled":
+			event["summary"] = "Tool was cancelled."
 		elif outcome in ["applied_recovery", "reverted_recovery"]:
 			event["summary"] = "Completed with cleanup required."
 		else:
@@ -1766,12 +2043,18 @@ func _render_session_event(event: Dictionary) -> void:
 			var sender := str(event.get("sender", ""))
 			var text := str(event.get("text", ""))
 			var completion := str(event.get("completion", "complete"))
+			var attribution := ResponseAttribution.sanitize(event.get("attribution", {})) if kind == "assistant" else {}
+			if not attribution.is_empty():
+				color = _assistant_color_for_mode(attribution["mode"])
 			if kind == "assistant" and completion in ["complete", "tool_preface"]:
-				_add_final_assistant_message(sender, text, color)
+				_add_final_assistant_message(sender, text, color, attribution)
 			else:
 				var label := _add_message(sender, text, color, kind)
+				if kind == "assistant":
+					_set_response_footer(_response_panel(label), attribution)
 				if kind == "user":
 					_add_message_images(label, event.get("images", []))
+					_add_message_script_references(label, event.get("script_references", []))
 		"tool":
 			var tool_name := str(event.get("name", ""))
 			var call_id := str(event.get("id", ""))
@@ -1809,6 +2092,7 @@ func _render_session_event(event: Dictionary) -> void:
 
 
 func _clear_chat_feed() -> void:
+	_dismiss_connection_setup(false)
 	_close_active_tool_group()
 	_tool_groups_by_call_id.clear()
 	_change_origin_turns.clear()
@@ -1861,9 +2145,14 @@ func _sync_session_usage(summary: Dictionary) -> void:
 			context_label.text += " / %s" % _format_token_count(context_limit)
 	else:
 		context_label.text = "Context --"
+	var request_budget: Dictionary = summary.get("request_budget", {})
+	if not request_budget.is_empty() and (request_budget.get("active", false) or request_budget.get("status") == "blocked"):
+		context_label.text = "Request ~%s" % _format_token_count(int(request_budget.get("estimated_tokens", 0)))
+		if int(request_budget.get("context_limit", 0)) > 0:
+			context_label.text += " / %s" % _format_token_count(int(request_budget["context_limit"]))
 	var total_tokens := int(summary.get("input_tokens", 0)) + int(summary.get("output_tokens", 0))
 	context_label.tooltip_text = (
-		"Current context: %s%s\nSession input: %s\nSession output: %s\nCached input: %s\nUsage reporting: %s"
+		"Latest completed request (provider-reported): %s%s\nSession input: %s\nSession output: %s\nCached input: %s\nUsage reporting: %s"
 		% [
 			_format_token_count(context_tokens),
 			" / " + _format_token_count(context_limit) if context_limit > 0 else "",
@@ -1873,6 +2162,8 @@ func _sync_session_usage(summary: Dictionary) -> void:
 			"complete" if usage_complete else "partial or unavailable"
 		]
 	)
+	if not request_budget.is_empty():
+		context_label.tooltip_text += "\n\nLocal request estimate: %d tokens (%s).\nSafe input budget: %d of %d tokens.\nReserved output: %d; future tool result: %d.\nIncludes request instructions, tool schemas/results, image reserves and private continuation when applicable. This estimate is separate from provider-reported usage and billing reservations." % [int(request_budget.get("estimated_tokens", 0)), str(request_budget.get("status", "prepared")), int(request_budget.get("input_budget", 0)), int(request_budget.get("context_limit", 0)), int(request_budget.get("output_reserve", 0)), int(request_budget.get("tool_reserve", 0))]
 	if bool(summary.get("cost_available", false)):
 		cost_label.text = "Cost $%.4f" % float(summary.get("cost_usd", 0.0))
 	else:
@@ -1899,11 +2190,16 @@ func _format_token_count(tokens: int) -> String:
 
 func _on_dock_resized() -> void:
 	_queue_prompt_height_sync()
+	_position_connection_overlay()
 	if mode_overlay.visible:
 		call_deferred("_position_mode_menu")
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
+	if _connection_overlay != null and _connection_overlay.visible and event.is_action_pressed("ui_cancel"):
+		_dismiss_connection_setup()
+		get_viewport().set_input_as_handled()
+		return
 	if mode_overlay.visible and event.is_action_pressed("ui_cancel"):
 		_hide_mode_menu()
 		get_viewport().set_input_as_handled()
@@ -1958,24 +2254,31 @@ func _update_message_label(label: RichTextLabel, sender: String, message: String
 	_queue_message_label_fit(label)
 
 
-func _add_final_assistant_message(sender: String, message: String, color: Color) -> void:
+func _add_final_assistant_message(sender: String, message: String, color: Color, attribution: Dictionary = {}) -> void:
+	var response_attribution := ResponseAttribution.sanitize(attribution)
+	if not response_attribution.is_empty():
+		color = _assistant_color_for_mode(response_attribution["mode"])
 	var label := _add_message(sender, message, color, "assistant")
-	_finalize_assistant_message(label, sender, message, color)
+	_finalize_assistant_message(label, sender, message, color, response_attribution)
 
 
-func _finalize_assistant_message(label: RichTextLabel, sender: String, message: String, color: Color) -> void:
+func _finalize_assistant_message(label: RichTextLabel, sender: String, message: String, color: Color, attribution: Dictionary = {}) -> void:
 	if not is_instance_valid(label):
 		return
 	var blocks := _split_final_message_blocks(message)
 	var has_code := blocks.any(func(block: Dictionary): return block.get("type") == "code")
 	if not has_code:
 		_update_message_label(label, sender, message, color)
+		_set_response_footer(_response_panel(label), attribution)
 		return
-	var panel := label.get_parent() as PanelContainer
+	var panel := _response_panel(label)
 	if panel == null:
 		return
-	panel.remove_child(label)
+	label.get_parent().remove_child(label)
 	label.queue_free()
+	for previous_child in panel.get_children():
+		panel.remove_child(previous_child)
+		previous_child.queue_free()
 	var content := VBoxContainer.new()
 	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	content.add_theme_constant_override("separation", UiMetrics.scaled_int(8))
@@ -1993,6 +2296,71 @@ func _finalize_assistant_message(label: RichTextLabel, sender: String, message: 
 			prose.text = _parse_markdown_to_bbcode(str(block.get("text", "")))
 			content.add_child(prose)
 			_queue_message_label_fit(prose)
+	_set_response_footer(panel, attribution)
+	_scroll_to_bottom()
+
+
+func _response_panel(label: RichTextLabel) -> PanelContainer:
+	var parent: Node = label.get_parent()
+	for _depth in range(3):
+		if parent is PanelContainer:
+			return parent
+		if parent == null:
+			break
+		parent = parent.get_parent()
+	return null
+
+
+func _set_response_footer(panel: PanelContainer, raw_attribution: Dictionary) -> void:
+	if panel == null:
+		return
+	var attribution := ResponseAttribution.sanitize(raw_attribution)
+	var content := panel.get_child(0) as VBoxContainer if panel.get_child_count() == 1 else null
+	if content != null:
+		for child in content.get_children():
+			if child.has_meta("orca_response_footer"):
+				content.remove_child(child)
+				child.queue_free()
+	if attribution.is_empty():
+		return
+	if content == null:
+		content = VBoxContainer.new()
+		content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		content.add_theme_constant_override("separation", 0)
+		for child in panel.get_children():
+			panel.remove_child(child)
+			content.add_child(child)
+		panel.add_child(content)
+	var footer := MarginContainer.new()
+	footer.set_meta("orca_response_footer", true)
+	footer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	footer.add_theme_constant_override("margin_top", maxi(0, UiMetrics.scaled_int(8) - content.get_theme_constant("separation")))
+	for edge in ["left", "right", "bottom"]:
+		footer.add_theme_constant_override("margin_" + edge, 0)
+	content.add_child(footer)
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_theme_constant_override("separation", UiMetrics.scaled_int(12))
+	footer.add_child(row)
+	var model := Label.new()
+	model.set_meta("orca_response_model", true)
+	model.text = attribution["model"]
+	model.tooltip_text = attribution["model"]
+	model.mouse_filter = Control.MOUSE_FILTER_PASS
+	model.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	model.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	model.max_lines_visible = 2
+	model.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	model.add_theme_font_size_override("font_size", _meta_font_size)
+	model.add_theme_color_override("font_color", Color(0.62, 0.65, 0.7))
+	row.add_child(model)
+	var mode := Label.new()
+	mode.set_meta("orca_response_mode", true)
+	mode.text = "Plan" if attribution["mode"] == AgentController.AgentMode.PLAN else "Work"
+	mode.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	mode.add_theme_font_size_override("font_size", _meta_font_size)
+	mode.add_theme_color_override("font_color", _assistant_color_for_mode(attribution["mode"]))
+	row.add_child(mode)
 	_scroll_to_bottom()
 
 
@@ -2314,6 +2682,143 @@ static func _split_final_message_blocks(text: String) -> Array[Dictionary]:
 	return blocks
 
 
+func _setup_connection_overlay() -> void:
+	if _connection_overlay != null:
+		return
+	# A positioned Control contributes no minimum size to the conversation or
+	# composer. The normal empty state retains its original scene/theme layout.
+	_connection_overlay = Control.new()
+	_connection_overlay.name = "ConnectionOverlay"
+	_connection_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	_connection_overlay.hide()
+	add_child(_connection_overlay)
+	var dim := ColorRect.new()
+	dim.name = "Dim"
+	dim.color = Color(0, 0, 0, 0.38)
+	dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_connection_overlay.add_child(dim)
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var margin := MarginContainer.new()
+	_connection_overlay.add_child(margin)
+	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_set_scaled_margins(margin, 12, 12, 12, 12)
+	_connection_overlay_scroll = ScrollContainer.new()
+	_connection_overlay_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	margin.add_child(_connection_overlay_scroll)
+	var center := CenterContainer.new()
+	center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	center.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_connection_overlay_scroll.add_child(center)
+	_connection_setup_card = ConnectionSetupPanel.new()
+	_connection_setup_card.name = "ConnectionSetup"
+	_connection_setup_card.body_font_size = _body_font_size
+	_connection_setup_card.meta_font_size = _meta_font_size
+	_connection_setup_card.account_requested.connect(_on_connection_account_requested)
+	_connection_setup_card.provider_requested.connect(_on_connection_provider_requested)
+	_connection_setup_card.model_requested.connect(_on_model_button_pressed)
+	_connection_setup_card.dismiss_requested.connect(_dismiss_connection_setup)
+	center.add_child(_connection_setup_card)
+	chat_scroll.resized.connect(_position_connection_overlay)
+	chat_scroll.item_rect_changed.connect(_position_connection_overlay)
+	visibility_changed.connect(_on_connection_view_visibility_changed)
+	main_content.visibility_changed.connect(_on_connection_view_visibility_changed)
+	_position_connection_overlay()
+
+
+func notify_dock_opened() -> void:
+	if _connection_overlay == null or not is_visible_in_tree() or not main_content.is_visible_in_tree():
+		return
+	_connection_dock_open_notified = true
+	_connection_first_open_pending = true
+	call_deferred("_maybe_show_first_connection_setup")
+
+
+func _on_connection_view_visibility_changed() -> void:
+	if not is_visible_in_tree() or not main_content.is_visible_in_tree():
+		_dismiss_connection_setup(false)
+	elif _connection_dock_open_notified:
+		# Godot may restore dock visibility during initialization. Only an
+		# explicit Orca opening arms subsequent visibility-driven notifications.
+		notify_dock_opened()
+
+
+func _maybe_show_first_connection_setup() -> void:
+	if _connection_overlay == null or _connection_first_open_checked or not _connection_first_open_pending or not is_visible_in_tree() or not main_content.is_visible_in_tree() or agent_controller == null or agent_controller.is_busy():
+		return
+	# Wait for the vault restoration decision without changing the empty state
+	# or consuming first-open intent while the dock is hidden.
+	if account_service != null and account_service.state == "restoring":
+		return
+	var setup: Dictionary = agent_controller.connection_setup()
+	_connection_first_open_checked = true
+	_connection_first_open_pending = false
+	if setup.get("status") != "ready" and not agent_controller.has_configured_connection() and _session_resumable:
+		_show_connection_setup(setup, true)
+
+
+func _refresh_connection_setup() -> void:
+	if _connection_overlay == null or agent_controller == null or not agent_controller.has_method("connection_setup"):
+		return
+	var setup: Dictionary = agent_controller.connection_setup()
+	var connected: bool = account_service != null and account_service.connected()
+	var account_state := str(account_service.state) if account_service != null else "signed_out"
+	if _connection_overlay.visible:
+		if setup.get("status") == "ready" or agent_controller.is_busy():
+			_dismiss_connection_setup(false)
+		else:
+			_connection_setup_card.configure(setup, connected, account_state, false, _connection_setup_first_open)
+	if _connection_first_open_pending and not _connection_first_open_checked:
+		call_deferred("_maybe_show_first_connection_setup")
+
+
+func _show_connection_setup(setup: Dictionary, first_open: bool = false) -> void:
+	if _connection_overlay == null or agent_controller == null or agent_controller.is_busy() or not _session_resumable:
+		return
+	_connection_first_open_checked = true
+	_connection_first_open_pending = false
+	_connection_setup_first_open = first_open
+	var connected: bool = account_service != null and account_service.connected()
+	_connection_setup_card.configure(setup, connected, str(account_service.state) if account_service != null else "signed_out", false, first_open)
+	mode_overlay.hide()
+	_connection_overlay.show()
+	_position_connection_overlay()
+	_connection_overlay_scroll.scroll_vertical = 0
+	call_deferred("_focus_connection_setup")
+
+
+func _position_connection_overlay() -> void:
+	if _connection_overlay == null:
+		return
+	_connection_overlay.position = chat_scroll.global_position - global_position
+	_connection_overlay.size = chat_scroll.size
+	var scrollbar_width := _connection_overlay_scroll.get_v_scroll_bar().get_combined_minimum_size().x
+	_connection_setup_card.custom_minimum_size.x = minf(UiMetrics.scaled(360), maxf(0.0, chat_scroll.size.x - UiMetrics.scaled(24) - scrollbar_width))
+
+
+func _focus_connection_setup() -> void:
+	if _connection_overlay == null or not _connection_overlay.is_visible_in_tree():
+		return
+	var button: Button = _connection_setup_card.model_button if _connection_setup_card.model_button.get_parent().visible else _connection_setup_card.provider_button if _connection_setup_card.account_button.disabled else _connection_setup_card.account_button
+	button.grab_focus()
+
+
+func _dismiss_connection_setup(focus_prompt: bool = true) -> void:
+	if _connection_overlay == null:
+		return
+	var was_visible := _connection_overlay.visible
+	_connection_overlay.hide()
+	if was_visible and focus_prompt and prompt_input.is_visible_in_tree():
+		prompt_input.grab_focus()
+
+
+func _on_connection_account_requested() -> void:
+	_open_settings(false, "account")
+
+
+func _on_connection_provider_requested() -> void:
+	_open_settings(false, "provider")
+
+
 func _on_settings_button_pressed() -> void:
 	_open_settings(false)
 
@@ -2322,9 +2827,10 @@ func _on_model_button_pressed() -> void:
 	_open_settings(true)
 
 
-func _open_settings(focus_model: bool) -> void:
+func _open_settings(focus_model: bool, setup_route: String = "") -> void:
 	if agent_controller != null and agent_controller.is_busy():
 		return
+	_dismiss_connection_setup(false)
 	if mode_overlay.visible:
 		mode_overlay.hide()
 	if history_view != null:
@@ -2335,7 +2841,11 @@ func _open_settings(focus_model: bool) -> void:
 		if agent_controller != null and agent_controller.has_method("support_request_metadata"):
 			support_metadata = agent_controller.support_request_metadata()
 		settings_view.set_support_request_metadata(support_metadata)
-	if focus_model:
+	if setup_route == "account":
+		settings_view.open_account_setup()
+	elif setup_route == "provider":
+		settings_view.open_provider_setup()
+	elif focus_model:
 		settings_view.open_model_configuration()
 	else:
 		settings_view.open()

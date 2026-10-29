@@ -8,12 +8,17 @@ permissions:
   contents: read
 
 jobs:
+  native-helpers:
+    uses: ./.github/workflows/native_helpers.yml
+
   godot-4-7-2:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       GODOT_VERSION: 4.7.2
       GODOT_BIN: ${{ github.workspace }}/.ci/Godot_v4.7.2-stable_linux.x86_64
+      ORCA_DISABLE_ACCOUNT_RESTORE: "1"
+      ORCA_DISABLE_UPDATE_CHECKS: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -26,6 +31,13 @@ jobs:
           unzip -q .ci/godot.zip -d .ci
           chmod +x "$GODOT_BIN"
 
+      - name: Build Linux credential bridge
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev
+          python3 scripts/build_native_helper.py
+
       - name: Import project assets
         shell: bash
         run: |
@@ -35,11 +47,20 @@ jobs:
         shell: bash
         run: |
           "$GODOT_BIN" --headless --path . --script res://tests/api_client_test.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/update_service_test.gd
+          python3 -m unittest discover -s tests -p update_package_test.py
+          python3 -m unittest discover -s tests -p native_helper_packaging_test.py
+          "$GODOT_BIN" --headless --path . --script res://tests/account_service_test.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/hosted_defaults_test.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/responses_protocol_test.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/deepseek_compatibility_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/provider_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/endpoint_policy_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/context_budget_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/image_attachments_test.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/image_model_switch_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/image_intake_test.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/script_references_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/patch_utils_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/tools_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/agent_controller_test.gd
@@ -49,10 +70,12 @@ jobs:
           "$GODOT_BIN" --headless --path . --script res://tests/settings_view_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/logo_asset_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/chat_window_test.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/response_attribution_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/mode_switch_card_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/tool_activity_group_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/task_list_panel_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/scene_inspector_test.gd
+          "$GODOT_BIN" --headless --path . --script res://tests/editor_scene_inspector_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/project_settings_inspector_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/project_instructions_test.gd
           "$GODOT_BIN" --headless --path . --script res://tests/project_skills_test.gd
@@ -72,10 +95,14 @@ jobs:
         shell: bash
         run: |
           "$GODOT_BIN" --headless --editor --path . --script res://tests/editor_ui_scale_test.gd
+          "$GODOT_BIN" --headless --editor --path . --script res://tests/update_editor_test.gd
           "$GODOT_BIN" --headless --editor --path . --script res://tests/editor_unsaved_state_test.gd
+          "$GODOT_BIN" --headless --editor --path . --script res://tests/editor_scene_inspector_editor_test.gd
           "$GODOT_BIN" --headless --editor --path . --script res://tests/diagnostics_editor_integration_test.gd
           "$GODOT_BIN" --headless --editor --path . --script res://tests/plugin_lifecycle_test.gd
           "$GODOT_BIN" --headless --editor --path . --script res://tests/provider_settings_editor_test.gd
+          "$GODOT_BIN" --headless --editor --path . --script res://tests/managed_settings_editor_test.gd
+          "$GODOT_BIN" --headless --editor --path . --script res://tests/onboarding_editor_test.gd
 
       - name: Run local transport integration
         shell: bash
@@ -99,10 +126,28 @@ jobs:
           "$GODOT_BIN" --headless --path . --script res://tests/agent_compatibility_probe_integration_test.gd
           wait "$server_pid"
           trap - EXIT
-          ORCA_TEST_REQUESTS=2 python3 tests/http_test_server.py &
+          ORCA_TEST_REQUESTS=10 python3 tests/http_test_server.py &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
           "$GODOT_BIN" --headless --path . --script res://tests/image_attachments_integration_test.gd
+          wait "$server_pid"
+          trap - EXIT
+          ORCA_TEST_REQUESTS=16 python3 tests/http_test_server.py &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          "$GODOT_BIN" --headless --path . --script res://tests/local_provider_integration_test.gd
+          wait "$server_pid"
+          trap - EXIT
+          ORCA_TEST_REQUESTS=15 python3 tests/http_test_server.py &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          "$GODOT_BIN" --headless --path . --script res://tests/responses_integration_test.gd
+          wait "$server_pid"
+          trap - EXIT
+          ORCA_TEST_REQUESTS=13 python3 tests/http_test_server.py &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          "$GODOT_BIN" --headless --path . --script res://tests/deepseek_compatibility_integration_test.gd
           wait "$server_pid"
           trap - EXIT
 

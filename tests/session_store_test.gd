@@ -30,11 +30,16 @@ func _run() -> void:
 		{"type": "tool", "id": "api_1", "name": "inspect_godot_api", "arguments": {"class_name": "Node", "member_name": "add_child", "member_kind": "method", "include_inherited": true, "report": "must-not-persist"}, "outcome": "completed", "summary": "Completed successfully.", "duration_ms": 2, "help_topic": "class_method:Node:add_child", "graph": "must-not-persist"},
 		{"type": "tool", "id": "function_1", "name": "read_gdscript_function", "arguments": {"filepath": "res://player.gd", "function_name": "move", "start_line_hint": 8, "include_documentation": false, "body": "must-not-persist", "disk_sha256": "must-not-persist"}, "outcome": "completed", "summary": "Completed successfully.", "duration_ms": 2},
 		{"type": "tool", "id": "deps_1", "name": "discover_dependencies", "arguments": {"filepath": "res://main.tscn", "direction": "reverse", "max_depth": 99, "max_results": 999, "graph": "must-not-persist", "hash": "must-not-persist"}, "outcome": "completed", "summary": "Completed successfully.", "duration_ms": 2, "help_topic": "https://example.invalid"},
-		{"type": "tool", "id": "mode_1", "name": "request_work_mode", "arguments": {"reason": "must-not-persist"}, "outcome": "completed", "summary": "Stayed in Plan mode", "duration_ms": 2}
+		{"type": "tool", "id": "mode_1", "name": "request_work_mode", "arguments": {"reason": "must-not-persist"}, "outcome": "completed", "summary": "Stayed in Plan mode", "duration_ms": 2},
+		{"type": "tool", "id": "live_1", "name": "inspect_editor_scene", "arguments": {"scope": "subtree", "node_path": "Menu/Panel", "scene_path": "res://menu.tscn", "max_nodes": 999, "max_depth": 99, "max_properties_per_node": 99, "include_properties": false, "properties": "must-not-persist", "base_hash": "must-not-persist"}, "outcome": "completed", "summary": "Historical live-editor inspection. Inspect again for current state.", "nodes": "must-not-persist", "duration_ms": 2},
+		{"type": "message", "sender": "Orca", "text": "First model answer", "kind": "assistant", "mode": 1, "completion": "complete", "attribution": {"model": "openai/model-A", "mode": 0, "provider": "must-not-persist", "reasoning": "must-not-persist", "api_key": "must-not-persist"}},
+		{"type": "message", "sender": "Orca", "text": "Second model answer", "kind": "assistant", "mode": 1, "completion": "cancelled", "attribution": {"model": "model-B", "mode": 1}},
+		{"type": "message", "sender": "Orca", "text": "Legacy answer", "kind": "assistant", "mode": 1, "completion": "complete"},
+		{"type": "message", "sender": "User", "text": "User input", "kind": "user", "mode": 1, "attribution": {"model": "must-not-persist", "mode": 1}}
 	]
 	session["continuation"] = [
 		{"role": "user", "content": "Build a test", "reasoning_content": "must-not-persist"},
-		{"role": "assistant", "content": "ORCA RECOVERY CHECKPOINT:\n- apply_patch: applied\nContinue from current project state.", "tool_calls": [{"id": "must-not-persist"}]}
+		{"role": "assistant", "content": "ORCA RECOVERY CHECKPOINT:\n- apply_patch: applied\nContinue from current project state.", "tool_calls": [{"id": "must-not-persist"}], "_orca_responses": {"binding": "must-not-persist", "items": [{"id": "opaque-private-id", "type": "reasoning", "encrypted_content": "must-not-persist", "content": [{"type": "reasoning_text", "text": "PRIVATE_DEEPSEEK_REASONING"}]}]}}
 	]
 	session["usage"] = {"model": "deepseek-chat", "input_tokens": 100, "output_tokens": 20, "cached_tokens": 10, "context_tokens": 120, "cost_usd": 0.002, "cost_available": true, "cost_complete": true, "usage_complete": true, "completed_requests": 1}
 	session["tasks"] = [
@@ -51,6 +56,8 @@ func _run() -> void:
 	_expect(not loaded.get("continuation", [])[0].has("reasoning_content"), "hidden reasoning must not be persisted")
 	_expect(str(loaded.get("continuation", [])[1].get("content", "")).begins_with("ORCA RECOVERY CHECKPOINT"), "a sanitized plain-assistant recovery checkpoint should survive persistence")
 	_expect(not loaded.get("continuation", [])[1].has("tool_calls"), "recovery continuation must never persist replayable tool calls")
+	_expect(not JSON.stringify(loaded).contains("_orca_responses") and not JSON.stringify(loaded).contains("opaque-private-id"), "Responses reasoning/items and profile binding must never persist")
+	_expect(not JSON.stringify(loaded).contains("PRIVATE_DEEPSEEK_REASONING"), "plain DeepSeek reasoning must never persist")
 	_expect(not loaded.get("events", [])[1].get("arguments", {}).has("edits"), "patch source must not be persisted in tool arguments")
 	_expect(loaded.get("events", [])[1].get("arguments", {}).get("query") == "Player", "bounded search queries should persist for restored activity labels")
 	_expect(loaded.get("events", [])[1].get("arguments", {}).get("scene_path") == "res://main.tscn", "bounded scene paths should persist for restored activity labels")
@@ -80,6 +87,11 @@ func _run() -> void:
 	_expect(dependency_arguments.size() == 4 and dependency_arguments.get("filepath") == "res://main.tscn" and dependency_arguments.get("direction") == "reverse" and int(dependency_arguments.get("max_depth", 0)) == 3 and int(dependency_arguments.get("max_results", 0)) == 100, "dependency activity should retain bounded target, direction, depth, and result count")
 	_expect(not loaded.get("events", [])[10].has("help_topic"), "unsafe help topic prefixes must not persist")
 	_expect(loaded.get("events", [])[11].get("name") == "request_work_mode" and loaded.get("events", [])[11].get("arguments", {}).is_empty() and loaded.get("events", [])[11].get("summary") == "Stayed in Plan mode", "mode decisions should persist only a non-actionable summary")
+	_expect(loaded.get("events", [])[12].get("arguments") == {"scope": "subtree", "node_path": "Menu/Panel", "scene_path": "res://menu.tscn", "max_nodes": 120, "max_depth": 16, "max_properties_per_node": 32, "include_properties": false}, "live inspection queries must persist only bounded scope/path/limit controls")
+	_expect(not loaded.get("events", [])[12].has("nodes") and str(loaded.get("events", [])[12].get("summary", "")).contains("Historical"), "live node snapshots must never be retained or replayed as current editor state")
+	_expect(loaded["events"][13].get("attribution") == {"model": "openai/model-A", "mode": 0} and loaded["events"][13].get("mode") == 0, "recorded attribution must survive JSON and override mismatched mutable mode labels")
+	_expect(loaded["events"][14].get("attribution") == {"model": "model-B", "mode": 1} and loaded["events"][14].get("completion") == "cancelled", "interrupted answers must retain their actual model/mode metadata")
+	_expect(not loaded["events"][15].has("attribution") and not loaded["events"][16].has("attribution"), "legacy and user messages must not receive fabricated attribution")
 	_expect(loaded.get("tasks", []).size() == 4, "sanitized task state should persist")
 	_expect(not loaded.get("tasks", [])[0].has("secret"), "unknown task fields must not persist")
 	_expect(loaded.get("tasks", [])[2].get("status") == "pending", "only one persisted task may remain in progress")

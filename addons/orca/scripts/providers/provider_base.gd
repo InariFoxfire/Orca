@@ -45,6 +45,14 @@ func apply_chat_options(body: Dictionary, effort: String) -> void:
 	pass
 
 
+func api_mode(config: Dictionary) -> String:
+	return "chat_completions"
+
+
+func prepare_messages(messages: Array, config: Dictionary) -> Array:
+	return sanitize_messages(messages)
+
+
 func allows_stop_finish_with_tool_calls() -> bool:
 	return false
 
@@ -83,6 +91,7 @@ func sanitize_messages(messages: Array) -> Array:
 	var sanitized := messages.duplicate(true)
 	for message in sanitized:
 		if typeof(message) == TYPE_DICTIONARY:
+			message.erase("_orca_responses")
 			message.erase("reasoning_content")
 			message.erase("reasoning")
 			message.erase("reasoning_details")

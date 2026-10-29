@@ -12,6 +12,10 @@ const APIClient = preload("res://addons/orca/scripts/api_client.gd")
 const Controller = preload("res://addons/orca/scripts/agent_controller.gd")
 var _failures: Array[String] = []
 
+class ImageController extends "res://addons/orca/scripts/agent_controller.gd":
+	func _capture_provider_config() -> Dictionary:
+		return {"provider": "openai", "base_url": "https://api.openai.com/v1", "model": "gpt-4o", "api_key": "synthetic-image-key"}
+
 class FakeClient extends Node:
 	signal stream_started(request_id: int)
 	signal stream_delta(request_id: int, content: String)
@@ -101,7 +105,7 @@ func _run() -> void:
 	store.delete_all_sessions()
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(store.storage_root()).path_join("index.json"))
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(store.storage_root()))
-	var controller := Controller.new()
+	var controller := ImageController.new()
 	get_root().add_child(controller)
 	var fake := FakeClient.new()
 	get_root().add_child(fake)

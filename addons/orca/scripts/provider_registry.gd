@@ -1,11 +1,13 @@
 @tool
 extends RefCounted
 
-const PROVIDER_IDS := ["openai", "gemini", "xai", "deepseek", "openrouter", "ollama", "lmstudio", "local_openai", "custom"]
+const PROVIDER_IDS := ["openai", "gemini", "xai", "deepseek", "openrouter", "azure", "orca_cloud", "ollama", "lmstudio", "local_openai", "custom"]
 
 
 static func get_provider(provider_id: String):
 	match provider_id:
+		"orca_cloud":
+			return preload("res://addons/orca/scripts/providers/orca_cloud_provider.gd").new()
 		"openai":
 			return preload("res://addons/orca/scripts/providers/openai_provider.gd").new()
 		"gemini":
@@ -16,6 +18,8 @@ static func get_provider(provider_id: String):
 			return preload("res://addons/orca/scripts/providers/deepseek_provider.gd").new()
 		"openrouter":
 			return preload("res://addons/orca/scripts/providers/openrouter_provider.gd").new()
+		"azure":
+			return preload("res://addons/orca/scripts/providers/azure_provider.gd").new()
 		"ollama", "lmstudio", "local_openai":
 			return preload("res://addons/orca/scripts/providers/local_openai_provider.gd").new(provider_id)
 		_:

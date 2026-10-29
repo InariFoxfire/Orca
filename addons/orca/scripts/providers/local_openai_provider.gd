@@ -67,6 +67,27 @@ func _runtime_root(config: Dictionary) -> String:
 	return base_url.trim_suffix("/v1") if base_url.ends_with("/v1") else base_url
 
 
+func sanitize_messages(messages: Array) -> Array:
+	# Local chat templates may accept only one leading system message. Normalize
+	# the wire copy, leaving request-scoped controller indices and history intact.
+	var sanitized := super.sanitize_messages(messages)
+	var system_message: Dictionary = {}
+	var system_parts := PackedStringArray()
+	var conversation: Array = []
+	for message in sanitized:
+		if typeof(message) == TYPE_DICTIONARY and message.get("role") == "system" and typeof(message.get("content")) == TYPE_STRING:
+			if system_message.is_empty():
+				system_message = message
+			system_parts.append(message["content"])
+		else:
+			# Do not coerce or silently discard malformed message content.
+			conversation.append(message)
+	if not system_message.is_empty():
+		system_message["content"] = "\n\n".join(system_parts)
+		conversation.push_front(system_message)
+	return conversation
+
+
 func normalize_models(response) -> Array[Dictionary]:
 	match _provider_id:
 		"ollama":

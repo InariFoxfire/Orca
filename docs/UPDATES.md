@@ -93,6 +93,8 @@ After the whole run succeeds, its Artifacts section contains:
 Per-platform `orca-helper-*` artifacts are intermediate build outputs. Keep the
 complete ZIP or aggregate tar.gz for distribution/preparation. Artifacts currently
 expire after 14 days; published Release assets are the durable user download.
+The package upload opts into hidden-file discovery only for `.ci/orca-v*.zip*`,
+so Actions includes the generated ZIP/checksum inside the hidden build directory.
 
 For local development packaging, extract the **matching source commit's** helper
 bundle at the repository root:
@@ -158,9 +160,9 @@ not the assembled updater release asset.
 
 Standard CI needs no private signing setup. Developer ID signing/notarization for
 Mac distribution would require a separate owner Apple Developer identity and
-workflow secret setup; this workflow makes no notarization claim. Windows/macOS
-runner execution and downloaded-package/Asset Library acceptance remain pending
-until those jobs and manual checks are actually exercised.
+workflow secret setup; this workflow makes no notarization claim. All four native
+runner build/acceptance jobs passed in Tests run #42. Complete CI success and
+downloaded-package/Asset Library acceptance remain required.
 
 ## Bounds and recovery
 
@@ -192,6 +194,9 @@ until those jobs and manual checks are actually exercised.
   Reopening uses a fixed `/bin/sh` `exec` program with separate quoted positional
   arguments to detach closed installer pipes. No model-provided commands or shell
   payloads are accepted. Windows uses Godot's native process APIs.
+- Handoff preserves the initiating editor's actual headless display backend using
+  `DisplayServer.get_name()`. Godot removes `--headless` from its exposed arguments;
+  relaunch does not infer display availability from those arguments.
 
 For an interrupted replacement, **Settings → General Settings → Restore previous addon &
 restart** restores only the exact unchanged retained original. The updater retains
@@ -226,8 +231,11 @@ Godot against disposable projects. It covers ZIP/header/path/size/checksum rejec
 modified installations, stale hashes, interrupted replacement, rollback, project
 locking, failed/cancelled real HTTP downloads and an actual independent
 wait/replace/reopen round trip. It makes no live inference, payment or owner-vault
-request. Editor checks include shared updater ownership, confirmation, active-work
-and dirty-source denial, dismissal, progress and narrow layouts.
+request. Fixture processes run without inherited X11/Wayland display variables,
+and the reopened plugin reports its headless backend to catch graphical relaunch
+regressions even on a developer desktop. Editor checks include shared updater
+ownership, confirmation, active-work and dirty-source denial, dismissal, progress
+and narrow layouts.
 
 Linux/Godot 4.7.2 headless acceptance is verified. Real GitHub release publication,
 graphical update/relaunch with a user's full project, other running editors,

@@ -90,5 +90,7 @@ jobs:
         with:
           name: orca-package
           path: .ci/orca-v*.zip*
+          # Wildcard searches otherwise exclude the hidden .ci directory.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14

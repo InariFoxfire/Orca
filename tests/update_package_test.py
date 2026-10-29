@@ -30,7 +30,7 @@ def addon(path: Path, version: str, restart_marker: bool = False) -> None:
     if restart_marker:
         script += f'''\nfunc _enter_tree() -> void:
     var file := FileAccess.open("res://restart-marker.json", FileAccess.WRITE)
-    file.store_string(JSON.stringify({{"version": "{version}", "pid": OS.get_process_id()}}))
+    file.store_string(JSON.stringify({{"version": "{version}", "pid": OS.get_process_id(), "display": DisplayServer.get_name()}}))
     file.close()
     call_deferred("_done")
 func _done() -> void:
@@ -71,6 +71,10 @@ class UpdateTests(unittest.TestCase):
         if not binary:
             self.skipTest("Set GODOT_BIN for actual Godot updater acceptance")
         env = {**os.environ, "ORCA_DISABLE_ACCOUNT_RESTORE": "1", "ORCA_DISABLE_UPDATE_CHECKS": "1"}
+        # Match display-free CI even when these tests run on a developer desktop.
+        # A mistakenly graphical relaunch must fail rather than masking the bug.
+        env.pop("DISPLAY", None)
+        env.pop("WAYLAND_DISPLAY", None)
         result = subprocess.run(
             [binary, "--headless", "--path", str(ROOT), "--script", "res://tests/update_package_fixture.gd"],
             input=json.dumps(setup) + "\n", text=True, capture_output=True, timeout=120, env=env,
@@ -235,6 +239,8 @@ class UpdateTests(unittest.TestCase):
             self.assertTrue(marker.exists(), "Independent updater did not reopen the new addon: " + str(diagnostics))
             receipt = json.loads(marker.read_text())
             self.assertEqual(receipt["version"], "1.4.0")
+            self.assertEqual(receipt["display"], "headless")
+            self.assertGreater(receipt["pid"], 0)
             # Wait for the fixture's newly opened editor to finish teardown.
             time.sleep(2)
             manifest = json.loads((project / "addons/orca/update_manifest.json").read_text())

@@ -248,7 +248,9 @@ func launch_installer(prepared: Dictionary, operation: String = "install") -> Di
 	_installer = OS.execute_with_pipe(OS.get_executable_path(), PackedStringArray(["--headless", "--path", runner_root, "--script", runner_root.path_join("update_runner.gd")]), false)
 	if _installer.is_empty():
 		return Package.failure("Godot could not start the independent updater.")
-	var intent := {"project": project, "parent_pid": OS.get_process_id(), "old_hash": str(prepared.get("old_hash", "")), "new_hash": str(prepared.get("new_hash", "")), "operation": operation, "headless": "--headless" in OS.get_cmdline_args()}
+	# Godot consumes --headless before exposing OS.get_cmdline_args(). Preserve
+	# the actual display backend so a display-free editor reopens display-free.
+	var intent := {"project": project, "parent_pid": OS.get_process_id(), "old_hash": str(prepared.get("old_hash", "")), "new_hash": str(prepared.get("new_hash", "")), "operation": operation, "headless": DisplayServer.get_name() == "headless"}
 	_installer["stdio"].store_string(JSON.stringify(intent) + "\n")
 	var output := PackedByteArray()
 	var deadline := Time.get_ticks_msec() + 30000

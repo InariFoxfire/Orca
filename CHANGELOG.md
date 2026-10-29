@@ -6,9 +6,6 @@ All notable changes to Orca are documented in this file.
 
 ## 1.4.0 - 2026-10-29
 
-Prepared release candidate. Publication is pending the owner's GitHub CI and
-platform acceptance; no release or tag has been created by this preparation.
-
 ### Added
 
 - Native GitHub Actions builds for Linux/Windows x86_64 and macOS arm64/x86_64, real isolated vault/protocol/locking/cross-Godot-process acceptance, aggregate helper downloads and a complete versioned plugin ZIP. Release preparation requires all four tested builds and packages them together.

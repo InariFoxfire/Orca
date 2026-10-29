@@ -84,7 +84,7 @@ Orca is released under the [MIT License](LICENSE). Its source, tool contracts, s
 
 ## What's New In 1.4.0
 
-The Orca 1.4.0 release candidate adds account access, deeper editor context, and a complete build/update workflow:
+The Orca 1.4.0 release adds account access, deeper editor context, and a complete build/update workflow:
 
 - Orca Cloud browser sign-in/sign-up, persistent OS-vault sessions, account allowance/model selection, and automatic managed Agent readiness.
 - Dismissible connection onboarding that preserves the original empty state and your draft.
@@ -93,7 +93,7 @@ The Orca 1.4.0 release candidate adds account access, deeper editor context, and
 - Vision/text-only model switching within a conversation, response attribution, native review minimaps, and the composer Tab mode shortcut.
 - Daily update checks, confirmed Update & Restart/rollback, four-platform native helper builds, and complete versioned plugin packages.
 
-Read the prepared release notes in the [changelog](CHANGELOG.md). After these changes are pushed, successful GitHub Actions runs provide the `orca-package` artifact with `orca-v1.4.0.zip` and its checksum. Published versions are available from [GitHub Releases](https://github.com/cold-atom/Orca/releases/latest); 1.4.0 publication and Windows/macOS acceptance are pending.
+Read the release notes in the [changelog](CHANGELOG.md). Orca 1.4.0 is available from [GitHub Releases](https://github.com/cold-atom/Orca/releases/tag/v1.4.0), including `orca-v1.4.0.zip` and its checksum.
 
 ### Orca Account
 
@@ -269,7 +269,7 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for the full architecture, tool contracts, 
 
 ## Project Status
 
-The prepared release candidate is **Orca 1.4.0** for **Godot 4.7.2**. Publication remains owner-controlled after GitHub CI and platform acceptance. Orca is a functional development-stage agent with permanent automated tests and CI, but it is still evolving. Review proposals carefully and use version control on real projects.
+**Orca 1.4.0** for **Godot 4.7.2** is released. Orca is a functional development-stage agent with permanent automated tests and CI, but it is still evolving. Review proposals carefully and use version control on real projects.
 
 ## Contributing
 
